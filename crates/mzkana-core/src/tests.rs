@@ -61,6 +61,13 @@ fn number_row_key_sends_kana() {
 }
 
 #[test]
+fn yen_key_mapping() {
+    let l = load_layout(SHIN_GETA).unwrap();
+    // yen key → ゛ (voiced sound mark)
+    assert_eq!(l.base_layer.get("yen").map(|s| s.as_str()), Some("゛"));
+}
+
+#[test]
 fn grid_row_mapping() {
     let l = load_layout(TSUKI).unwrap();
     // Row 1 (q..p): q → 。

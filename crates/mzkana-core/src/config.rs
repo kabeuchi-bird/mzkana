@@ -237,7 +237,7 @@ pub struct DirectRule {
 ///   row 1 → top row    (q w e r t y u i o p)
 ///   row 2 → home row   (a s d f g h j k l ;)
 ///   row 3 → bottom row (z x c v b n m , . /)
-const QWERTY_ROW0: &[&str] = &["1","2","3","4","5","6","7","8","9","0","minus","equal"];
+const QWERTY_ROW0: &[&str] = &["1","2","3","4","5","6","7","8","9","0","minus","equal","yen"];
 const QWERTY_ROW1: &[&str] = &["q","w","e","r","t","y","u","i","o","p"];
 const QWERTY_ROW2: &[&str] = &["a","s","d","f","g","h","j","k","l","semicolon"];
 const QWERTY_ROW3: &[&str] = &["z","x","c","v","b","n","m","comma","period","slash"];
