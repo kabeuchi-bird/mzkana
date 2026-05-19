@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use crate::config::{Layout, LayoutMode, TapAction, TriggerKind};
+use crate::config::{HoldDetection, Layout, LayoutMode, ModifierKind, TapAction, TriggerKind};
 
 // ── Public event types ────────────────────────────────────────────────────────
 
@@ -83,12 +83,14 @@ enum MozcMode {
 #[derive(Debug, Clone)]
 struct ModifierState {
     id: String,
-    /// True while the physical key is held down.
+    /// True while the physical key is held down (both interrupt and timeout modes).
     held: bool,
     /// True when another key was pressed during the hold (interrupt-style detection).
     interrupted: bool,
-    /// When the key was pressed (for timeout detection).
+    /// When the key was pressed (for timeout detection and tap disambiguation).
     pressed_at: Instant,
+    /// Oneshot mode: true after press, cleared after the next non-modifier key.
+    oneshot_pending: bool,
 }
 
 /// State of the direct trigger.
@@ -123,6 +125,7 @@ impl StateMachine {
                 held: false,
                 interrupted: false,
                 pressed_at: Instant::now(),
+                oneshot_pending: false,
             })
             .collect();
 
@@ -145,6 +148,14 @@ impl StateMachine {
         self.pending_keys.clear();
         self.mozc_mode = MozcMode::Composition;
         self.chord_deadline = None;
+        for ms in &mut self.modifier_states {
+            ms.held = false;
+            ms.interrupted = false;
+            ms.oneshot_pending = false;
+        }
+        self.direct_trigger_state = DirectTriggerState::Inactive;
+        self.direct_trigger_held = false;
+        self.direct_trigger_interrupted = false;
         actions
     }
 
@@ -184,9 +195,14 @@ impl StateMachine {
 
         // Check if key is a modifier definition
         if let Some(idx) = self.modifier_index(key) {
-            self.modifier_states[idx].held = true;
+            let kind = self.layout.modifiers[idx].kind;
             self.modifier_states[idx].interrupted = false;
             self.modifier_states[idx].pressed_at = now;
+            if kind == ModifierKind::Oneshot {
+                self.modifier_states[idx].oneshot_pending = true;
+            } else {
+                self.modifier_states[idx].held = true;
+            }
             return Vec::new();
         }
 
@@ -222,8 +238,11 @@ impl StateMachine {
         }
 
         // Find active modifier layer
-        if let Some(mod_output) = self.check_modified_layer(key) {
-            // Modified layer: output is final, no speculative needed
+        if let Some(mod_output) = self.check_modified_layer(key, now) {
+            // Consume oneshot after first use
+            for ms in &mut self.modifier_states {
+                ms.oneshot_pending = false;
+            }
             let mut actions = Vec::new();
             actions.push(OutputAction::SendKana(mod_output.clone()));
             self.tentative_buffer.push(TentativeChar {
@@ -246,11 +265,13 @@ impl StateMachine {
         // Modifier key released
         if let Some(idx) = self.modifier_index(key) {
             let was_interrupted = self.modifier_states[idx].interrupted;
+            let had_oneshot = self.modifier_states[idx].oneshot_pending;
             self.modifier_states[idx].held = false;
+            self.modifier_states[idx].oneshot_pending = false;
 
             let modifier_def = &self.layout.modifiers[idx];
-            if !was_interrupted {
-                // Tap action
+            // Tap action fires when key was released without triggering anything
+            if !was_interrupted && !had_oneshot {
                 match modifier_def.tap_action {
                     TapAction::SendKey | TapAction::Passthrough => {
                         return vec![OutputAction::Passthrough(key.to_string())];
@@ -445,6 +466,7 @@ impl StateMachine {
     // ── Direct (kanchoku) mode ────────────────────────────────────────────────
 
     fn process_direct_key(&mut self, key: &str, now: Instant) -> Vec<OutputAction> {
+        self.direct_trigger_interrupted = true;
         self.pending_keys.push((key.to_string(), now));
         let pending: Vec<String> = self.pending_keys.iter().map(|(k, _)| k.clone()).collect();
 
@@ -523,7 +545,7 @@ impl StateMachine {
         }
     }
 
-    fn handle_direct_trigger_up(&mut self, _key: &str, _now: Instant) -> Vec<OutputAction> {
+    fn handle_direct_trigger_up(&mut self, key: &str, _now: Instant) -> Vec<OutputAction> {
         let kind = self
             .layout
             .direct_trigger
@@ -550,7 +572,7 @@ impl StateMachine {
         if !was_interrupted {
             match tap_action {
                 TapAction::Passthrough | TapAction::SendKey => {
-                    // tap: pass through the trigger key
+                    return vec![OutputAction::Passthrough(key.to_string())];
                 }
                 TapAction::None => {}
             }
@@ -564,8 +586,15 @@ impl StateMachine {
         if !self.tentative_buffer.is_empty() {
             self.tentative_buffer.pop();
             self.pending_keys.clear();
+            vec![OutputAction::Backspace]
+        } else if !self.pending_keys.is_empty() {
+            // Partial prefix/direct sequence in progress — discard silently
+            self.pending_keys.clear();
+            Vec::new()
+        } else {
+            // Nothing buffered internally — forward to application
+            vec![OutputAction::Backspace]
         }
-        vec![OutputAction::Backspace]
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -579,9 +608,23 @@ impl StateMachine {
         self.layout.base_layer.get(key).cloned()
     }
 
-    fn check_modified_layer(&self, key: &str) -> Option<String> {
-        for ms in &self.modifier_states {
-            if ms.held {
+    fn check_modified_layer(&self, key: &str, now: Instant) -> Option<String> {
+        for (ms, mod_def) in self.modifier_states.iter().zip(self.layout.modifiers.iter()) {
+            let active = if ms.oneshot_pending {
+                true
+            } else if ms.held {
+                match mod_def.hold_detection {
+                    HoldDetection::Timeout => {
+                        now.duration_since(ms.pressed_at).as_millis() as u32
+                            >= mod_def.hold_timeout_ms
+                    }
+                    HoldDetection::Interrupt => true,
+                }
+            } else {
+                false
+            };
+
+            if active {
                 for (mod_id, grid) in &self.layout.modified_layers {
                     if *mod_id == ms.id {
                         if let Some(kana) = grid.get(key) {

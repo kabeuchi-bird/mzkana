@@ -300,7 +300,11 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
                 "1" => QWERTY_ROW1.to_vec(),
                 "2" => QWERTY_ROW2.to_vec(),
                 "3" => QWERTY_ROW3.to_vec(),
-                _ => continue, // unrecognised row label → skip
+                other => {
+                    return Err(ConfigError::GridParse(format!(
+                        "unknown row label '{other}' (expected 0-3 or an explicit '.' header)"
+                    )));
+                }
             }
         };
 

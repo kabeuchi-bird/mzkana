@@ -240,3 +240,82 @@ output = "X"
 "#;
     assert!(load_layout(toml).is_ok());
 }
+
+// ── Fix regressions ───────────────────────────────────────────────────────────
+
+#[test]
+fn unknown_row_label_is_error() {
+    // Row label "r1" is not 0-3 → must fail
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+r1 あ い
+"""
+"#;
+    let err = load_layout(toml).unwrap_err();
+    assert!(err.to_string().contains("r1"), "error should mention the bad label");
+}
+
+#[test]
+fn backspace_with_pending_only_no_external_bs() {
+    // When only pending_keys exist (e.g. mid-prefix), BS should not forward externally
+    let mut m = sm(TSUKI);
+    let now = Instant::now();
+    // Press 'd' — it has prefix candidates, so only goes into pending (speculative sends て)
+    m.process(InputEvent::down("d"), now);
+    // Pop the tentative 'て' so tentative_buffer is empty but pending still in progress
+    m.process(InputEvent::down("bs"), now); // pops tentative+pending
+    // Now both are clear; next BS should forward externally
+    let bs = m.process(InputEvent::down("bs"), now);
+    assert!(bs.contains(&OutputAction::Backspace));
+}
+
+#[test]
+fn reset_clears_modifier_state() {
+    let mut m = sm(NAGINATA);
+    let now = Instant::now();
+    // Activate center modifier
+    m.process(InputEvent::down("space"), now);
+    // Reset — modifier should be cleared
+    m.reset();
+    // Now pressing a key should NOT go through the modified layer
+    let a = m.process(InputEvent::down("q"), now);
+    // After reset, space modifier is gone; q should produce base kana (ば), not ぁ
+    assert!(!a.contains(&OutputAction::SendKana("ぁ".to_string())));
+}
+
+#[test]
+fn direct_trigger_tap_returns_passthrough() {
+    // Hybrid layout with direct trigger; tapping the trigger with no other key
+    // should emit a Passthrough action for the trigger key.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "hybrid"
+schema = 1
+[direct_trigger]
+keys       = ["henkan"]
+kind       = "hold"
+tap_action = "passthrough"
+[[direct]]
+sequence = ["a", "b"]
+output   = "日"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // Press and release trigger without pressing any other key
+    m.process(InputEvent::down("henkan"), now);
+    let actions = m.process(InputEvent::up("henkan"), now);
+    assert!(
+        actions.contains(&OutputAction::Passthrough("henkan".to_string())),
+        "tap should produce passthrough: {actions:?}"
+    );
+}
