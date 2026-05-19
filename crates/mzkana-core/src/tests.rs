@@ -43,6 +43,24 @@ fn load_t_code() {
 // ── Grid parsing ──────────────────────────────────────────────────────────────
 
 #[test]
+fn grid_number_row_mapping() {
+    let l = load_layout(SHIN_GETA).unwrap();
+    // Row 0 maps to physical keys 1..0,minus,equal
+    // shin-geta: key "1" → ぁ, key "6" → ゃ
+    assert_eq!(l.base_layer.get("1").map(|s| s.as_str()), Some("ぁ"));
+    assert_eq!(l.base_layer.get("6").map(|s| s.as_str()), Some("ゃ"));
+    // Row 1 keys still work: "q" → た
+    assert_eq!(l.base_layer.get("q").map(|s| s.as_str()), Some("た"));
+}
+
+#[test]
+fn number_row_key_sends_kana() {
+    let mut m = sm(SHIN_GETA);
+    let actions = press_seq(&mut m, &["1"]);
+    assert!(actions.contains(&OutputAction::SendKana("ぁ".to_string())));
+}
+
+#[test]
 fn grid_row_mapping() {
     let l = load_layout(TSUKI).unwrap();
     // Row 1 (q..p): q → 。

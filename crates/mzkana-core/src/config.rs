@@ -233,21 +233,26 @@ pub struct DirectRule {
 // ── Grid parsing ──────────────────────────────────────────────────────────────
 
 /// QWERTY keyboard rows used for implicit row-to-key mapping.
-/// Row numbers 1, 2, 3 in the grid map to these key sequences.
+///   row 0 → number row (1 2 3 4 5 6 7 8 9 0 minus equal)
+///   row 1 → top row    (q w e r t y u i o p)
+///   row 2 → home row   (a s d f g h j k l ;)
+///   row 3 → bottom row (z x c v b n m , . /)
+const QWERTY_ROW0: &[&str] = &["1","2","3","4","5","6","7","8","9","0","minus","equal"];
 const QWERTY_ROW1: &[&str] = &["q","w","e","r","t","y","u","i","o","p"];
 const QWERTY_ROW2: &[&str] = &["a","s","d","f","g","h","j","k","l","semicolon"];
 const QWERTY_ROW3: &[&str] = &["z","x","c","v","b","n","m","comma","period","slash"];
 
 /// Parse a grid string into a map of key_id → kana.
 ///
-/// The header line (`. col1 col2 ...`) defines column positions.
-/// Numbered rows (1, 2, 3) map those column positions to the corresponding
-/// QWERTY keyboard row keys:
-///   row 1 → q w e r t y u i o p
-///   row 2 → a s d f g h j k l ;
-///   row 3 → z x c v b n m , . /
+/// The header line (`. col1 col2 ...`) defines column positions (visual only).
+/// Numbered rows map those column positions to physical keys by keyboard row:
+///   row 0 → 1 2 3 4 5 6 7 8 9 0 minus equal   (number row)
+///   row 1 → q w e r t y u i o p               (top row)
+///   row 2 → a s d f g h j k l ;               (home row)
+///   row 3 → z x c v b n m , . /               (bottom row)
 ///
-/// Non-numeric row labels are treated as explicit key-row headers (`. key1 key2 ...`).
+/// A mid-grid line starting with `.` switches to an explicit key list for
+/// subsequent rows.
 pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     let lines: Vec<&str> = grid
@@ -291,18 +296,11 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
             ek.iter().map(String::as_str).collect()
         } else {
             match row_label {
+                "0" => QWERTY_ROW0.to_vec(),
                 "1" => QWERTY_ROW1.to_vec(),
                 "2" => QWERTY_ROW2.to_vec(),
                 "3" => QWERTY_ROW3.to_vec(),
-                _ => {
-                    // Treat as explicit key list if it doesn't look like a number
-                    if row_label.parse::<u32>().is_err() {
-                        // row_label itself is the first key; cols are key-value pairs
-                        // Fallback: skip unrecognized rows
-                        continue;
-                    }
-                    continue;
-                }
+                _ => continue, // unrecognised row label → skip
             }
         };
 
