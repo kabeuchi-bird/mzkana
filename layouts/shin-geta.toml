@@ -1,0 +1,92 @@
+# ============================================================
+# 新下駄配列（同時シフト）
+# ============================================================
+
+[meta]
+name    = "新下駄配列"
+version = "1.0"
+mode    = "kana"
+schema  = 1
+
+[settings]
+chord_window_ms    = 50
+mutual_window_ms   = 80
+caps_lock_behavior = "shift"
+on_focus_change    = "preserve"
+roll_over          = true
+
+# ── Base layer ────────────────────────────────────────────────────────────────
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q    w    e    r    t    y    u    i    o    p
+1 た   て   い   す   か   ん   な   に   っ   ち
+2 は   と   し   き   く   の   お   り   つ   ，
+3 ．   わ   ひ   ふ   こ   み   や   ゆ   よ   ．
+"""
+
+# ── 同時シフト chord ──────────────────────────────────────────────────────────
+
+# 左右同時（母音系）
+[[chord]]
+keys   = ["f", "j"]
+output = "を"
+
+[[chord]]
+keys   = ["d", "k"]
+output = "も"
+
+[[chord]]
+keys   = ["s", "l"]
+output = "ら"
+
+[[chord]]
+keys   = ["a", "semicolon"]
+output = "ね"
+
+[[chord]]
+keys   = ["g", "h"]
+output = "ー"
+
+# 左手濁音
+[[chord]]
+keys      = ["q", "t"]
+output    = "だ"
+symmetric = false
+
+[[chord]]
+keys      = ["w", "t"]
+output    = "で"
+symmetric = false
+
+[[chord]]
+keys      = ["e", "t"]
+output    = "ず"
+symmetric = false
+
+[[chord]]
+keys      = ["r", "t"]
+output    = "ぐ"
+symmetric = false
+
+# 右手濁音
+[[chord]]
+keys      = ["y", "u"]
+output    = "が"
+symmetric = false
+
+[[chord]]
+keys      = ["y", "i"]
+output    = "ど"
+symmetric = false
+
+[[chord]]
+keys      = ["y", "o"]
+output    = "ば"
+symmetric = false
+
+[[chord]]
+keys      = ["y", "p"]
+output    = "ざ"
+symmetric = false
