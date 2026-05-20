@@ -288,6 +288,24 @@ impl StateMachine {
                     TapAction::SendKey | TapAction::Passthrough => {
                         return vec![OutputAction::Passthrough(key.to_string())];
                     }
+                    TapAction::BaseKana => {
+                        // Dual-role: tap emits the base-layer kana for this key.
+                        if let Some(kana) = self.lookup_base(key) {
+                            let action = Self::make_output_action(&kana);
+                            let is_fkey = matches!(action, OutputAction::SendFunctionKey(_));
+                            let out = vec![action];
+                            if !is_fkey {
+                                self.tentative_buffer.push(TentativeChar {
+                                    kana: kana.clone(),
+                                    source_keys: vec![key.to_string()],
+                                    sent_at: now,
+                                    rewrite_deadline: None,
+                                    pending_tail: Vec::new(),
+                                });
+                            }
+                            return out;
+                        }
+                    }
                     TapAction::None => {}
                 }
             }
@@ -632,7 +650,8 @@ impl StateMachine {
                 TapAction::Passthrough | TapAction::SendKey => {
                     return vec![OutputAction::Passthrough(key.to_string())];
                 }
-                TapAction::None => {}
+                // BaseKana is only meaningful for modifier keys, not direct triggers.
+                TapAction::BaseKana | TapAction::None => {}
             }
         }
         Vec::new()

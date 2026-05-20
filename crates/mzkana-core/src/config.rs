@@ -150,6 +150,9 @@ pub enum HoldDetection {
 pub enum TapAction {
     SendKey,
     Passthrough,
+    /// Emit the base-layer kana for this key on tap, enabling dual-role keys:
+    /// tap → base kana, hold + other key → modified layer kana.
+    BaseKana,
     None,
 }
 

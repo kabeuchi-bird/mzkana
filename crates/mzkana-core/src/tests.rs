@@ -610,3 +610,73 @@ ku_ret = "、 !Return"
         "no tail after rewrite: {tick_actions:?}"
     );
 }
+
+// ── tap_action = base_kana ────────────────────────────────────────────────────
+
+// f is row-2 index 3 (a s d f g …); g is index 4.
+// Header column labels are visual-only; physical keys come from row position.
+const DUAL_ROLE_LAYOUT: &str = r#"
+[meta]
+name   = "dual-role test"
+mode   = "kana"
+schema = 1
+
+[[modifier]]
+id             = "shift_f"
+key            = "f"
+kind           = "hold"
+hold_detection = "interrupt"
+tap_action     = "base_kana"
+
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. a    s    d    f    g
+2 ＿   ＿   ＿   か   き
+"""
+
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "shift_f"
+grid     = """
+. a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ぎ
+"""
+"#;
+
+#[test]
+fn dual_role_tap_emits_base_kana() {
+    // Tapping the modifier key alone should emit its base-layer kana.
+    let layout = load_layout(DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("f"), now);
+    let actions = m.process(InputEvent::up("f"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("か".to_string())),
+        "tap should emit base kana: {actions:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "か");
+}
+
+#[test]
+fn dual_role_hold_emits_shifted_kana() {
+    // Holding the modifier key then pressing another key should emit the shifted kana.
+    let layout = load_layout(DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("f"), now);      // modifier held
+    let actions = m.process(InputEvent::down("g"), now); // shifted layer → ぎ
+    assert!(
+        actions.contains(&OutputAction::SendKana("ぎ".to_string())),
+        "hold+key should emit shifted kana: {actions:?}"
+    );
+    // Releasing modifier after use must not emit base kana (was_interrupted=true)
+    let up = m.process(InputEvent::up("f"), now);
+    assert!(
+        !up.contains(&OutputAction::SendKana("か".to_string())),
+        "release after hold must not emit tap kana: {up:?}"
+    );
+}
