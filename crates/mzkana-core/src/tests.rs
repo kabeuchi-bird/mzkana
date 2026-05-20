@@ -1130,3 +1130,95 @@ tap_output = "あ"
 "#;
     assert!(load_layout(toml).is_err());
 }
+
+// ── Mozc codec unit tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod codec_tests {
+    use crate::mozc::codec::{decode, find_bytes, find_msg, find_varint, write_len_field, write_varint_field};
+
+    fn round_trip_varint(field: u32, value: u64) {
+        let mut buf = Vec::new();
+        write_varint_field(&mut buf, field, value);
+        let fields = decode(&buf).unwrap();
+        assert_eq!(find_varint(&fields, field), Some(value));
+    }
+
+    #[test]
+    fn codec_varint_roundtrip_small() {
+        round_trip_varint(1, 0);
+        round_trip_varint(1, 1);
+        round_trip_varint(2, 127);
+        round_trip_varint(3, 128);
+        round_trip_varint(15, u64::MAX);
+    }
+
+    #[test]
+    fn codec_len_field_roundtrip() {
+        let data = "かきくけこ".as_bytes();
+        let mut buf = Vec::new();
+        write_len_field(&mut buf, 5, data);
+        let fields = decode(&buf).unwrap();
+        assert_eq!(find_bytes(&fields, 5), Some(data));
+    }
+
+    #[test]
+    fn codec_multiple_fields() {
+        let mut buf = Vec::new();
+        write_varint_field(&mut buf, 1, 42);
+        write_len_field(&mut buf, 2, b"hello");
+        write_varint_field(&mut buf, 3, 99);
+        let fields = decode(&buf).unwrap();
+        assert_eq!(find_varint(&fields, 1), Some(42));
+        assert_eq!(find_bytes(&fields, 2), Some(b"hello".as_slice()));
+        assert_eq!(find_varint(&fields, 3), Some(99));
+    }
+
+    #[test]
+    fn codec_nested_message_roundtrip() {
+        // inner = { field 2: "かな" }
+        let mut inner = Vec::new();
+        write_len_field(&mut inner, 2, "かな".as_bytes());
+        let mut outer = Vec::new();
+        write_varint_field(&mut outer, 1, 7);
+        write_len_field(&mut outer, 4, &inner);
+        let fields = decode(&outer).unwrap();
+        assert_eq!(find_varint(&fields, 1), Some(7));
+        let inner_fields = find_msg(&fields, 4).unwrap();
+        assert_eq!(find_bytes(&inner_fields, 2), Some("かな".as_bytes()));
+    }
+
+    #[test]
+    fn codec_group_encode_decode() {
+        // Proto2 group: field 2, START_GROUP wire=3, fields, END_GROUP wire=4
+        // Start:  tag = (2 << 3) | 3 = 0x13
+        // End:    tag = (2 << 3) | 4 = 0x14
+        let mut buf = Vec::new();
+        write_varint_field(&mut buf, 1, 3); // Preedit.cursor = 3
+        buf.push(0x13);                     // Segment group start
+        write_varint_field(&mut buf, 3, 2); // Segment.annotation = HIGHLIGHT(2)
+        write_len_field(&mut buf, 4, "変換".as_bytes()); // Segment.value
+        buf.push(0x14);                     // Segment group end
+
+        let fields = decode(&buf).unwrap();
+        assert_eq!(find_varint(&fields, 1), Some(3));
+        let seg_fields = find_msg(&fields, 2).unwrap();
+        assert_eq!(find_varint(&seg_fields, 3), Some(2)); // HIGHLIGHT
+        assert_eq!(find_bytes(&seg_fields, 4), Some("変換".as_bytes()));
+    }
+
+    #[test]
+    fn proto_encode_send_kana_is_non_empty() {
+        use crate::mozc::proto::{encode_command, input_send_kana};
+        let encoded = encode_command(&input_send_kana(1234, "あ"));
+        assert!(!encoded.is_empty());
+        // Command.input = field 1
+        let fields = decode(&encoded).unwrap();
+        let input_bytes = find_bytes(&fields, 1).expect("Command.input missing");
+        let input_fields = decode(input_bytes).unwrap();
+        // Input.type = SEND_KEY (3)
+        assert_eq!(find_varint(&input_fields, 1), Some(3));
+        // Input.id = 1234
+        assert_eq!(find_varint(&input_fields, 2), Some(1234));
+    }
+}
