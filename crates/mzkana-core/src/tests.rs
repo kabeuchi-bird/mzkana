@@ -136,16 +136,15 @@ fn chord_rewrite() {
 fn chord_symmetric_either_order() {
     let mut m = sm(NAGINATA);
     let now = Instant::now();
-    // [[chord]] keys=["a","s"] symmetric=true output="ざ"
-    // Try s first, then a
-    let a1 = m.process(InputEvent::down("s"), now);
-    // s in naginata base (row2 col1 = a? no... row2: a,s,d,f,g,h,j,k,l,semicolon)
-    // base row2: は,と,に,い,り,の,す,き,る,ち -> a=は
-    // So s→と
+    // [[chord]] keys=["f","j"] symmetric=true output="が"
+    // Try j first, then f (reverse order from definition)
+    let a1 = m.process(InputEvent::down("j"), now);
+    // base row2: a=ろ s=け d=と f=か g=っ h=く j=あ …
+    // So j → あ speculatively
     assert!(!a1.is_empty());
-    let a2 = m.process(InputEvent::down("a"), now);
+    let a2 = m.process(InputEvent::down("f"), now);
     assert!(a2.contains(&OutputAction::Backspace));
-    assert!(a2.contains(&OutputAction::SendKana("ざ".to_string())));
+    assert!(a2.contains(&OutputAction::SendKana("が".to_string())));
 }
 
 // ── Kanchoku / T-code ─────────────────────────────────────────────────────────
@@ -198,11 +197,11 @@ fn backspace_pops_tentative() {
 fn center_shift_modifier_layer() {
     let mut m = sm(NAGINATA);
     let now = Instant::now();
-    // Hold space (center modifier), then press q
+    // Hold space (center modifier), then press w
     m.process(InputEvent::down("space"), now);
-    let a = m.process(InputEvent::down("q"), now);
-    // center_shift layer row1 q → ぁ
-    assert!(a.contains(&OutputAction::SendKana("ぁ".to_string())));
+    let a = m.process(InputEvent::down("w"), now);
+    // center_shift layer row1 w → め
+    assert!(a.contains(&OutputAction::SendKana("め".to_string())));
 }
 
 // ── Conflict detection ────────────────────────────────────────────────────────
@@ -292,6 +291,133 @@ fn reset_clears_modifier_state() {
 }
 
 #[test]
+fn function_key_in_chord() {
+    // A chord whose output is a function key should emit SendFunctionKey, not SendKana
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+1 あ い
+"""
+[[chord]]
+keys   = ["q", "w"]
+output = "!Return"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("q"), now);
+    let actions = m.process(InputEvent::down("w"), now);
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "chord !Return should produce SendFunctionKey: {actions:?}"
+    );
+    // Must not appear in preedit
+    assert_eq!(m.tentative_kana_string(), "");
+}
+
+#[test]
+fn function_key_in_base_layer() {
+    // A base layer cell with !Tab should emit SendFunctionKey immediately
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+1 あ !Tab
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    let actions = m.process(InputEvent::down("w"), now);
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Tab".to_string())),
+        "{actions:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "");
+}
+
+#[test]
+fn invalid_function_key_name_is_error() {
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[chord]]
+keys   = ["a", "b"]
+output = "!SuperFakeKey"
+"#;
+    assert!(load_layout(toml).is_err());
+}
+
+#[test]
+fn invalid_function_key_in_multi_token_output_is_error() {
+    // An output like "、 !SuperFakeKey" splits into two tokens;
+    // the second token must be validated even though the whole string
+    // does not start with '!'.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q
+1 "、 !SuperFakeKey"
+"""
+"#;
+    assert!(load_layout(toml).is_err());
+}
+
+#[test]
+fn invalid_function_key_in_alias_is_error() {
+    // An alias value containing an invalid !-prefixed token must be rejected.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[alias]]
+bad_alias = "、 !SuperFakeKey"
+"#;
+    assert!(load_layout(toml).is_err());
+}
+
+#[test]
+fn empty_alias_sequence_is_error() {
+    // An alias mapped to an empty string must fail validation to prevent
+    // a panic at tokens[0] in the state machine.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[alias]]
+empty_alias = ""
+"#;
+    let err = load_layout(toml).unwrap_err();
+    assert!(
+        err.to_string().contains("empty_alias"),
+        "error should mention the alias name: {err}"
+    );
+}
+
+#[test]
 fn direct_trigger_tap_returns_passthrough() {
     // Hybrid layout with direct trigger; tapping the trigger with no other key
     // should emit a Passthrough action for the trigger key.
@@ -317,5 +443,170 @@ output   = "日"
     assert!(
         actions.contains(&OutputAction::Passthrough("henkan".to_string())),
         "tap should produce passthrough: {actions:?}"
+    );
+}
+
+// ── Alias / quoted-sequence features ─────────────────────────────────────────
+
+#[test]
+fn alias_single_key_no_chord_emits_all_tokens() {
+    // A key with an alias output and no chord candidate emits all tokens immediately.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+1 ku_ret い
+"""
+[[alias]]
+ku_ret = "、 !Return"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    let actions = m.process(InputEvent::down("q"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("、".to_string())),
+        "should emit kana: {actions:?}"
+    );
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "should emit function key: {actions:?}"
+    );
+}
+
+#[test]
+fn quoted_cell_no_chord_emits_all_tokens() {
+    // A grid cell with "kana !FKey" (quoted) and no chord candidate emits both immediately.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q
+1 "。 !Return"
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    let actions = m.process(InputEvent::down("q"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("。".to_string())),
+        "kana: {actions:?}"
+    );
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "fkey: {actions:?}"
+    );
+}
+
+#[test]
+fn alias_with_chord_candidate_defers_tail() {
+    // When the key that carries a multi-token alias output is also part of a chord,
+    // only the first kana is emitted speculatively; the tail is held until confirmed.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+1 ku_ret い
+"""
+[[chord]]
+keys   = ["q", "w"]
+output = "う"
+window_ms = 50
+[[alias]]
+ku_ret = "、 !Return"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    // Press q — speculative: only 、 is emitted; !Return is deferred
+    let a1 = m.process(InputEvent::down("q"), now);
+    assert!(
+        a1.contains(&OutputAction::SendKana("、".to_string())),
+        "speculative kana emitted: {a1:?}"
+    );
+    assert!(
+        !a1.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "tail must NOT be emitted yet: {a1:?}"
+    );
+
+    // tick() after deadline: tail should now be emitted
+    let later = now + std::time::Duration::from_millis(100);
+    let tick_actions = m.tick(later);
+    assert!(
+        tick_actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "tail emitted after deadline: {tick_actions:?}"
+    );
+}
+
+#[test]
+fn alias_chord_fires_no_double_emission() {
+    // When the chord fires, the speculative kana is rewritten; the deferred tail
+    // must NOT be emitted (it is discarded along with the speculative char).
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+1 ku_ret い
+"""
+[[chord]]
+keys   = ["q", "w"]
+output = "う"
+window_ms = 50
+[[alias]]
+ku_ret = "、 !Return"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    // q: speculative 、
+    m.process(InputEvent::down("q"), now);
+    // w (within window): chord fires → rewrite to う
+    let a2 = m.process(InputEvent::down("w"), now);
+    assert!(
+        a2.contains(&OutputAction::Backspace),
+        "should rewrite speculative: {a2:?}"
+    );
+    assert!(
+        a2.contains(&OutputAction::SendKana("う".to_string())),
+        "chord output: {a2:?}"
+    );
+    // !Return must NOT appear — the pending tail was discarded
+    assert!(
+        !a2.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "tail must be discarded on rewrite: {a2:?}"
+    );
+
+    // tick() after deadline: nothing extra from the discarded tail
+    let later = now + std::time::Duration::from_millis(100);
+    let tick_actions = m.tick(later);
+    assert!(
+        !tick_actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "no tail after rewrite: {tick_actions:?}"
     );
 }

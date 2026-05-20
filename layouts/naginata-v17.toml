@@ -24,13 +24,19 @@ hold_detection  = "interrupt"
 hold_timeout_ms = 150
 tap_action      = "send_key"
 
+# ── 別名シーケンス定義 ────────────────────────────────────────────────────────
+# グリッドや chord の output フィールドで `ku_ret` / `to_ret` を参照できます。
+[[alias]]
+ku_ret = "、 !Return"
+to_ret = "。 !Return"
+
 # ── Base layer ────────────────────────────────────────────────────────────────
 [[layer]]
 id   = "base"
 kind = "single"
 grid = """
 . q    w    e    r    t    y    u    i    o    p
-1 ．   き   て   し   ．   ．   ．   る   す   へ
+1 ＿   き   て   し   !Up !Down !BackSpace  る   す   へ
 2 ろ   け   と   か   っ   く   あ   い   う   ー
 3 ほ   ひ   は   こ   そ   た   な   ん   ら   れ
 """
@@ -42,9 +48,9 @@ kind     = "modified"
 modifier = "center"
 grid     = """
 . q    w    e    r    t    y    u    i    o    p
-1 ．   め   り   ね   ．   ．   さ   よ   え   ゆ
+1 ＿   め   り   ね   ＿   ＿   さ   よ   え   ゆ
 2 せ   み   に   ま   ち   や   の   も   つ   ふ
-3 ほ   ひ   を   、   ぬ   お   。   む   わ   れ
+3 ほ   ひ   を ku_ret ぬ   お to_ret む   わ   れ
 """
 
 # ── 相互シフト（濁音・拗音など） ──────────────────────────────────────────────

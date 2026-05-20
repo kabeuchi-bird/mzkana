@@ -10,6 +10,7 @@ schemars = { version = "0.8", features = ["derive"] }
 indexmap = { version = "2", features = ["serde"] }
 thiserror = "1"
 tracing = "0.1"
+phf = { version = "0.11", features = ["macros"] }
 
 [dev-dependencies]
 insta = "1"

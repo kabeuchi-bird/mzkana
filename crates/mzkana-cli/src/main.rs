@@ -131,6 +131,7 @@ fn print_action(action: &OutputAction) {
         OutputAction::SubmitAndCommit(s) => println!("submit_and_commit({s})"),
         OutputAction::Passthrough(k) => println!("passthrough({k})"),
         OutputAction::MozcSubmit => println!("mozc_submit"),
+        OutputAction::SendFunctionKey(k) => println!("send_function_key({k})"),
     }
 }
 

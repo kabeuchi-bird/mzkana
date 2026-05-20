@@ -21,6 +21,10 @@ pub struct LayoutFile {
     pub chord: Vec<ChordRule>,
     #[serde(default)]
     pub direct: Vec<DirectRule>,
+    /// Named output sequences, e.g. `ku_ret = "、 !Enter"`.
+    /// Each `[[alias]]` table contributes zero or more name→sequence pairs.
+    #[serde(default)]
+    pub alias: Vec<HashMap<String, String>>,
 }
 
 // ── Meta ──────────────────────────────────────────────────────────────────────
@@ -230,6 +234,24 @@ pub struct DirectRule {
     pub output: String,
 }
 
+// ── Function key registry ─────────────────────────────────────────────────────
+
+/// XKB keysym names accepted after the `!` prefix in output strings.
+/// These are passed through to the fcitx5 layer as-is.
+pub static VALID_FUNCTION_KEYS: phf::Set<&'static str> = phf::phf_set! {
+    // Navigation
+    "Return", "Tab", "Escape", "BackSpace", "Delete",
+    "Home", "End", "Insert",
+    "Up", "Down", "Left", "Right",
+    "Prior", "Next",          // PageUp / PageDown
+    "PageUp", "PageDown",     // common aliases
+    // Function keys
+    "F1",  "F2",  "F3",  "F4",  "F5",  "F6",
+    "F7",  "F8",  "F9",  "F10", "F11", "F12",
+    // Editing / IME
+    "space", "Henkan", "Muhenkan", "Hiragana_Katakana",
+};
+
 // ── Grid parsing ──────────────────────────────────────────────────────────────
 
 /// QWERTY keyboard rows used for implicit row-to-key mapping.
@@ -278,16 +300,16 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
     let mut explicit_keys: Option<Vec<String>> = None;
 
     for line in &lines[1..] {
-        let cols: Vec<&str> = line.split_whitespace().collect();
+        let cols = tokenize_grid_row(line);
         if cols.len() < 2 {
             continue;
         }
 
-        let row_label = cols[0];
+        let row_label = cols[0].as_str();
 
         // A line starting with `.` is a new explicit key header
         if row_label == "." {
-            explicit_keys = Some(cols[1..].iter().map(|s| s.to_string()).collect());
+            explicit_keys = Some(cols[1..].to_vec());
             continue;
         }
 
@@ -309,18 +331,55 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
         };
 
         let values = &cols[1..];
-        for (i, kana) in values.iter().enumerate() {
+        for (i, value) in values.iter().enumerate() {
             if i >= key_row.len() || i >= col_count {
                 break;
             }
-            if *kana == "." || kana.is_empty() {
+            // TODO: ASCII "." は後方互換のため残存。将来のスキーマ改訂で削除予定。
+            if *value == "＿" || *value == "." || value.is_empty() {
                 continue;
             }
-            map.insert(key_row[i].to_string(), kana.to_string());
+            map.insert(key_row[i].to_string(), value.to_string());
         }
     }
 
     Ok(map)
+}
+
+/// Split a grid data row into cell tokens, respecting `"..."` quoted strings
+/// (which may contain spaces and represent multi-token output sequences).
+///
+/// Example: `1 あ "、 !Enter" か` → `["1", "あ", "、 !Enter", "か"]`
+pub(crate) fn tokenize_grid_row(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = s.chars().peekable();
+
+    loop {
+        // Skip whitespace between tokens
+        while chars.peek().map_or(false, |c| c.is_ascii_whitespace()) {
+            chars.next();
+        }
+        match chars.peek() {
+            None => break,
+            Some('"') => {
+                chars.next(); // consume opening quote
+                let mut tok = String::new();
+                for c in chars.by_ref() {
+                    if c == '"' { break; }
+                    tok.push(c);
+                }
+                tokens.push(tok);
+            }
+            _ => {
+                let mut tok = String::new();
+                while chars.peek().map_or(false, |c| !c.is_ascii_whitespace()) {
+                    tok.push(chars.next().unwrap());
+                }
+                tokens.push(tok);
+            }
+        }
+    }
+    tokens
 }
 
 // ── Layout (compiled) ─────────────────────────────────────────────────────────
@@ -332,16 +391,18 @@ pub struct Layout {
     pub settings: Settings,
     pub modifiers: Vec<ModifierDef>,
     pub direct_trigger: Option<DirectTriggerDef>,
-    /// base layer grid: key_id → kana
+    /// base layer grid: key_id → raw output string
     pub base_layer: HashMap<String, String>,
-    /// prefix layers: trigger_key → (key_id → kana)
+    /// prefix layers: trigger_key → (key_id → raw output string)
     pub prefix_layers: Vec<(String, HashMap<String, String>)>,
-    /// postfix layers: trigger_key → (key_id → kana)
+    /// postfix layers: trigger_key → (key_id → raw output string)
     pub postfix_layers: Vec<(String, HashMap<String, String>)>,
-    /// modified layers: modifier_id → (key_id → kana)
+    /// modified layers: modifier_id → (key_id → raw output string)
     pub modified_layers: Vec<(String, HashMap<String, String>)>,
     pub chords: Vec<ChordRule>,
     pub directs: Vec<DirectRule>,
+    /// Named output sequences: alias_name → Vec of output tokens
+    pub aliases: HashMap<String, Vec<String>>,
 }
 
 impl Layout {
@@ -387,6 +448,22 @@ impl Layout {
             }
         }
 
+        // Flatten all [[alias]] tables into a single map
+        let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
+        for alias_table in &file.alias {
+            for (name, seq_str) in alias_table {
+                let tokens: Vec<String> =
+                    seq_str.split_whitespace().map(|s| s.to_string()).collect();
+                if tokens.is_empty() {
+                    return Err(ConfigError::MissingField(format!(
+                        "alias '{name}' has an empty sequence; \
+                         at least one token is required"
+                    )));
+                }
+                aliases.insert(name.clone(), tokens);
+            }
+        }
+
         let layout = Layout {
             meta: file.meta.clone(),
             settings: file.settings.clone(),
@@ -398,6 +475,7 @@ impl Layout {
             modified_layers,
             chords: file.chord.clone(),
             directs: file.direct.clone(),
+            aliases,
         };
 
         layout.validate()?;
@@ -405,9 +483,56 @@ impl Layout {
     }
 
     fn validate(&self) -> Result<()> {
-        // Check for same-context conflicts
         self.check_direct_conflicts()?;
         self.check_modifier_key_overlap()?;
+        self.check_function_key_names()?;
+        Ok(())
+    }
+
+    fn check_function_key_names(&self) -> Result<()> {
+        // Collect every raw output string from all rule sources.
+        let all_outputs = self
+            .chords
+            .iter()
+            .map(|c| c.output.as_str())
+            .chain(self.directs.iter().map(|d| d.output.as_str()))
+            .chain(self.base_layer.values().map(String::as_str))
+            .chain(
+                self.prefix_layers
+                    .iter()
+                    .flat_map(|(_, g)| g.values().map(String::as_str)),
+            )
+            .chain(
+                self.postfix_layers
+                    .iter()
+                    .flat_map(|(_, g)| g.values().map(String::as_str)),
+            )
+            .chain(
+                self.modified_layers
+                    .iter()
+                    .flat_map(|(_, g)| g.values().map(String::as_str)),
+            );
+
+        // Each raw output may be a multi-token sequence (space-separated).
+        // Alias values are also validated (they may contain !-prefixed tokens).
+        let alias_tokens = self
+            .aliases
+            .values()
+            .flat_map(|tokens| tokens.iter().map(String::as_str));
+
+        for token in all_outputs
+            .flat_map(|s| s.split_whitespace())
+            .chain(alias_tokens)
+        {
+            if let Some(key_name) = token.strip_prefix('!') {
+                if !VALID_FUNCTION_KEYS.contains(key_name) {
+                    return Err(ConfigError::GridParse(format!(
+                        "unknown function key '!{key_name}'; \
+                         see the layout documentation for valid names"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
