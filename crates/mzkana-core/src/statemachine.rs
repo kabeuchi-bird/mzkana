@@ -59,6 +59,9 @@ pub enum OutputAction {
     Passthrough(String),
     /// Notify Mozc that conversion is complete (e.g. Enter)
     MozcSubmit,
+    /// Send a function/control key (e.g. Return, Tab, Up) bypassing Mozc preedit.
+    /// The string is the XKB keysym name as used in the layout file after the `!` prefix.
+    SendFunctionKey(String),
 }
 
 // ── Internal state ────────────────────────────────────────────────────────────
@@ -317,13 +320,20 @@ impl StateMachine {
             return self.apply_rule_match(resolved, now);
         }
 
-        let Some(kana) = base_kana else {
+        let Some(output) = base_kana else {
             // No base assignment for this key (e.g. pure trigger key) — don't send tentative
             return actions;
         };
 
+        // Function keys in the base layer are emitted immediately, not tentatively
+        if let Some(key_name) = output.strip_prefix('!') {
+            self.pending_keys.clear();
+            actions.push(OutputAction::SendFunctionKey(key_name.to_string()));
+            return actions;
+        }
+
         // Send speculative kana
-        actions.push(OutputAction::SendKana(kana.clone()));
+        actions.push(OutputAction::SendKana(output.clone()));
 
         let rewrite_deadline = if has_chord_candidate {
             let window = self.chord_window_for(key);
@@ -342,7 +352,7 @@ impl StateMachine {
         };
 
         self.tentative_buffer.push(TentativeChar {
-            kana,
+            kana: output,
             source_keys: vec![key.to_string()],
             sent_at: now,
             rewrite_deadline,
@@ -449,14 +459,19 @@ impl StateMachine {
         self.tentative_buffer
             .truncate(self.tentative_buffer.len() - affected_count);
 
-        actions.push(OutputAction::SendKana(rule.output.clone()));
+        let action = Self::make_output_action(&rule.output);
+        let is_function_key = matches!(action, OutputAction::SendFunctionKey(_));
+        actions.push(action);
 
-        self.tentative_buffer.push(TentativeChar {
-            kana: rule.output,
-            source_keys: rule.source_keys,
-            sent_at: now,
-            rewrite_deadline: None,
-        });
+        // Function keys are not tracked in tentative_buffer (no preedit involvement)
+        if !is_function_key {
+            self.tentative_buffer.push(TentativeChar {
+                kana: rule.output,
+                source_keys: rule.source_keys,
+                sent_at: now,
+                rewrite_deadline: None,
+            });
+        }
 
         self.pending_keys.clear();
         self.update_chord_deadline();
@@ -473,7 +488,7 @@ impl StateMachine {
         // Check for complete match
         for rule in &self.layout.directs.clone() {
             if rule.sequence == pending {
-                let kanji = rule.output.clone();
+                let output = rule.output.clone();
                 self.pending_keys.clear();
 
                 let mut actions = Vec::new();
@@ -483,7 +498,14 @@ impl StateMachine {
                     actions.extend(flush);
                     actions.push(OutputAction::MozcSubmit);
                 }
-                actions.push(OutputAction::CommitDirect(kanji));
+                // Function keys bypass commit; plain strings are direct commits
+                if output.starts_with('!') {
+                    actions.push(OutputAction::SendFunctionKey(
+                        output[1..].to_string(),
+                    ));
+                } else {
+                    actions.push(OutputAction::CommitDirect(output));
+                }
                 return actions;
             }
         }
@@ -693,6 +715,16 @@ impl StateMachine {
             .iter()
             .filter_map(|tc| tc.rewrite_deadline)
             .min();
+    }
+
+    /// Convert an output string from the layout config into the appropriate OutputAction.
+    /// Strings starting with `!` are function keys (e.g. `!Return`, `!Tab`).
+    fn make_output_action(output: &str) -> OutputAction {
+        if let Some(key_name) = output.strip_prefix('!') {
+            OutputAction::SendFunctionKey(key_name.to_string())
+        } else {
+            OutputAction::SendKana(output.to_string())
+        }
     }
 
     /// Emit backspaces for all tentative chars (used before kanchoku commit, reset, etc.)

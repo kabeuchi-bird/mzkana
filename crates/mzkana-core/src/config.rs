@@ -230,6 +230,24 @@ pub struct DirectRule {
     pub output: String,
 }
 
+// ── Function key registry ─────────────────────────────────────────────────────
+
+/// XKB keysym names accepted after the `!` prefix in output strings.
+/// These are passed through to the fcitx5 layer as-is.
+pub static VALID_FUNCTION_KEYS: phf::Set<&'static str> = phf::phf_set! {
+    // Navigation
+    "Return", "Tab", "Escape", "BackSpace", "Delete",
+    "Home", "End", "Insert",
+    "Up", "Down", "Left", "Right",
+    "Prior", "Next",          // PageUp / PageDown
+    "PageUp", "PageDown",     // common aliases
+    // Function keys
+    "F1",  "F2",  "F3",  "F4",  "F5",  "F6",
+    "F7",  "F8",  "F9",  "F10", "F11", "F12",
+    // Editing / IME
+    "space", "Henkan", "Muhenkan", "Hiragana_Katakana",
+};
+
 // ── Grid parsing ──────────────────────────────────────────────────────────────
 
 /// QWERTY keyboard rows used for implicit row-to-key mapping.
@@ -405,9 +423,45 @@ impl Layout {
     }
 
     fn validate(&self) -> Result<()> {
-        // Check for same-context conflicts
         self.check_direct_conflicts()?;
         self.check_modifier_key_overlap()?;
+        self.check_function_key_names()?;
+        Ok(())
+    }
+
+    fn check_function_key_names(&self) -> Result<()> {
+        let all_outputs = self
+            .chords
+            .iter()
+            .map(|c| c.output.as_str())
+            .chain(self.directs.iter().map(|d| d.output.as_str()))
+            .chain(self.base_layer.values().map(String::as_str))
+            .chain(
+                self.prefix_layers
+                    .iter()
+                    .flat_map(|(_, g)| g.values().map(String::as_str)),
+            )
+            .chain(
+                self.postfix_layers
+                    .iter()
+                    .flat_map(|(_, g)| g.values().map(String::as_str)),
+            )
+            .chain(
+                self.modified_layers
+                    .iter()
+                    .flat_map(|(_, g)| g.values().map(String::as_str)),
+            );
+
+        for output in all_outputs {
+            if let Some(key_name) = output.strip_prefix('!') {
+                if !VALID_FUNCTION_KEYS.contains(key_name) {
+                    return Err(ConfigError::GridParse(format!(
+                        "unknown function key '!{key_name}'; \
+                         see the layout documentation for valid names"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 

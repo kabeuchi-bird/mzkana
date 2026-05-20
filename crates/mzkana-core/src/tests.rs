@@ -292,6 +292,79 @@ fn reset_clears_modifier_state() {
 }
 
 #[test]
+fn function_key_in_chord() {
+    // A chord whose output is a function key should emit SendFunctionKey, not SendKana
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+1 あ い
+"""
+[[chord]]
+keys   = ["q", "w"]
+output = "!Return"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("q"), now);
+    let actions = m.process(InputEvent::down("w"), now);
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "chord !Return should produce SendFunctionKey: {actions:?}"
+    );
+    // Must not appear in preedit
+    assert_eq!(m.tentative_kana_string(), "");
+}
+
+#[test]
+fn function_key_in_base_layer() {
+    // A base layer cell with !Tab should emit SendFunctionKey immediately
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q w
+1 あ !Tab
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    let actions = m.process(InputEvent::down("w"), now);
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Tab".to_string())),
+        "{actions:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "");
+}
+
+#[test]
+fn invalid_function_key_name_is_error() {
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[chord]]
+keys   = ["a", "b"]
+output = "!SuperFakeKey"
+"#;
+    assert!(load_layout(toml).is_err());
+}
+
+#[test]
 fn direct_trigger_tap_returns_passthrough() {
     // Hybrid layout with direct trigger; tapping the trigger with no other key
     // should emit a Passthrough action for the trigger key.
