@@ -335,6 +335,7 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
             if i >= key_row.len() || i >= col_count {
                 break;
             }
+            // TODO: ASCII "." は後方互換のため残存。将来のスキーマ改訂で削除予定。
             if *value == "＿" || *value == "." || value.is_empty() {
                 continue;
             }
