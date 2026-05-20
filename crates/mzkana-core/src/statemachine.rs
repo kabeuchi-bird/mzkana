@@ -74,6 +74,10 @@ struct TentativeChar {
     sent_at: Instant,
     /// Some(deadline) → chord rewrite window; None → sequence (permanent) or confirmed
     rewrite_deadline: Option<Instant>,
+    /// Tokens after the leading kana that are emitted once this char is confirmed
+    /// (chord deadline expired or no chord candidates). Used for sequences like
+    /// `"、 !Enter"` whose leading kana is sent speculatively.
+    pending_tail: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,18 +169,22 @@ impl StateMachine {
     /// Call periodically to fire chord timers.
     /// Returns any actions from expired tentative chars (they become confirmed).
     pub fn tick(&mut self, now: Instant) -> Vec<OutputAction> {
+        let mut actions = Vec::new();
         if let Some(deadline) = self.chord_deadline {
             if now >= deadline {
-                // Confirm all expired tentative chars.
+                // Confirm all expired tentative chars and emit any deferred tail tokens.
                 for tc in &mut self.tentative_buffer {
                     if tc.rewrite_deadline.map_or(false, |d| now >= d) {
                         tc.rewrite_deadline = None;
+                        for token in tc.pending_tail.drain(..) {
+                            actions.push(Self::make_output_action(&token));
+                        }
                     }
                 }
                 self.update_chord_deadline();
             }
         }
-        Vec::new()
+        actions
     }
 
     /// Process one input event, returning a list of output actions.
@@ -253,6 +261,7 @@ impl StateMachine {
                 source_keys: vec![key.to_string()],
                 sent_at: now,
                 rewrite_deadline: None,
+                pending_tail: Vec::new(),
             });
             return actions;
         }
@@ -325,15 +334,34 @@ impl StateMachine {
             return actions;
         };
 
-        // Function keys in the base layer are emitted immediately, not tentatively
-        if let Some(key_name) = output.strip_prefix('!') {
+        // Resolve to token sequence (alias / quoted sequence / single token)
+        let tokens: Vec<String> = self
+            .resolve_sequence(&output)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // A leading function-key token: emit entire sequence immediately (non-speculative)
+        if tokens.first().map_or(false, |t| t.starts_with('!')) {
             self.pending_keys.clear();
-            actions.push(OutputAction::SendFunctionKey(key_name.to_string()));
-            return actions;
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
         }
 
-        // Send speculative kana
-        actions.push(OutputAction::SendKana(output.clone()));
+        let needs_speculation =
+            has_chord_candidate || has_prefix_continuation || has_postfix_candidate;
+
+        // Multi-token with no speculation needed: emit all immediately
+        if tokens.len() > 1 && !needs_speculation {
+            self.pending_keys.clear();
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
+        }
+
+        // Speculative emit of first kana; tail (if any) deferred until confirmed
+        let kana = tokens[0].clone();
+        let pending_tail: Vec<String> = tokens[1..].iter().cloned().collect();
+        actions.push(OutputAction::SendKana(kana.clone()));
 
         let rewrite_deadline = if has_chord_candidate {
             let window = self.chord_window_for(key);
@@ -344,18 +372,29 @@ impl StateMachine {
             });
             Some(deadline)
         } else if has_prefix_continuation || has_postfix_candidate {
-            None // sequence: permanently rewritable until resolved
+            None // sequence rule: permanently rewritable until resolved
         } else {
-            // Single hit, no continuations → immediately confirmed
+            // Confirmed immediately — no continuations; emit any tail right away
             self.pending_keys.clear();
-            None
+            for t in &pending_tail {
+                actions.push(Self::make_output_action(t));
+            }
+            self.tentative_buffer.push(TentativeChar {
+                kana,
+                source_keys: vec![key.to_string()],
+                sent_at: now,
+                rewrite_deadline: None,
+                pending_tail: Vec::new(),
+            });
+            return actions;
         };
 
         self.tentative_buffer.push(TentativeChar {
-            kana: output,
+            kana,
             source_keys: vec![key.to_string()],
             sent_at: now,
             rewrite_deadline,
+            pending_tail,
         });
 
         actions
@@ -446,11 +485,7 @@ impl StateMachine {
             .tentative_buffer
             .iter()
             .rev()
-            .take_while(|tc| {
-                tc.source_keys
-                    .iter()
-                    .any(|k| rule.source_keys.contains(k))
-            })
+            .take_while(|tc| tc.source_keys.iter().any(|k| rule.source_keys.contains(k)))
             .count();
 
         for _ in 0..affected_count {
@@ -459,19 +494,15 @@ impl StateMachine {
         self.tentative_buffer
             .truncate(self.tentative_buffer.len() - affected_count);
 
-        let action = Self::make_output_action(&rule.output);
-        let is_function_key = matches!(action, OutputAction::SendFunctionKey(_));
-        actions.push(action);
-
-        // Function keys are not tracked in tentative_buffer (no preedit involvement)
-        if !is_function_key {
-            self.tentative_buffer.push(TentativeChar {
-                kana: rule.output,
-                source_keys: rule.source_keys,
-                sent_at: now,
-                rewrite_deadline: None,
-            });
-        }
+        // Resolve the output string to owned tokens, then emit
+        let tokens: Vec<String> = self
+            .resolve_sequence(&rule.output)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let seq_actions = self.emit_sequence(&token_refs, rule.source_keys, None, now);
+        actions.extend(seq_actions);
 
         self.pending_keys.clear();
         self.update_chord_deadline();
@@ -498,13 +529,18 @@ impl StateMachine {
                     actions.extend(flush);
                     actions.push(OutputAction::MozcSubmit);
                 }
-                // Function keys bypass commit; plain strings are direct commits
-                if output.starts_with('!') {
-                    actions.push(OutputAction::SendFunctionKey(
-                        output[1..].to_string(),
-                    ));
-                } else {
-                    actions.push(OutputAction::CommitDirect(output));
+                // Resolve aliases / sequences, then emit each token
+                let tokens: Vec<String> = self
+                    .resolve_sequence(&output)
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                for token in tokens {
+                    if let Some(key_name) = token.strip_prefix('!') {
+                        actions.push(OutputAction::SendFunctionKey(key_name.to_string()));
+                    } else {
+                        actions.push(OutputAction::CommitDirect(token));
+                    }
                 }
                 return actions;
             }
@@ -727,6 +763,47 @@ impl StateMachine {
         }
     }
 
+    /// Expand an output string into a token sequence, resolving aliases and
+    /// space-separated (quoted-cell) sequences.
+    ///
+    /// Priority: alias name > space-separated inline sequence > single token.
+    fn resolve_sequence<'a>(&'a self, raw: &'a str) -> Vec<&'a str> {
+        if let Some(tokens) = self.layout.aliases.get(raw) {
+            return tokens.iter().map(String::as_str).collect();
+        }
+        if raw.contains(' ') {
+            return raw.split_whitespace().collect();
+        }
+        vec![raw]
+    }
+
+    /// Emit OutputActions for a resolved token sequence and update tentative_buffer.
+    /// Returns the emitted actions.
+    fn emit_sequence(
+        &mut self,
+        tokens: &[&str],
+        source_keys: Vec<String>,
+        rewrite_deadline: Option<std::time::Instant>,
+        now: std::time::Instant,
+    ) -> Vec<OutputAction> {
+        let mut actions = Vec::new();
+        for &token in tokens {
+            let action = Self::make_output_action(token);
+            let is_fkey = matches!(action, OutputAction::SendFunctionKey(_));
+            actions.push(action);
+            if !is_fkey {
+                self.tentative_buffer.push(TentativeChar {
+                    kana: token.to_string(),
+                    source_keys: source_keys.clone(),
+                    sent_at: now,
+                    rewrite_deadline,
+                    pending_tail: Vec::new(),
+                });
+            }
+        }
+        actions
+    }
+
     /// Emit backspaces for all tentative chars (used before kanchoku commit, reset, etc.)
     fn flush_tentative(&mut self) -> Vec<OutputAction> {
         let count = self.tentative_buffer.len();
@@ -768,6 +845,7 @@ impl StateMachine {
 // ── Internal helper ───────────────────────────────────────────────────────────
 
 struct RuleMatch {
+    /// Raw output string (single token, alias name, or space-separated sequence)
     output: String,
     source_keys: Vec<String>,
 }

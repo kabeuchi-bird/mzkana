@@ -24,6 +24,12 @@ hold_detection  = "interrupt"
 hold_timeout_ms = 150
 tap_action      = "send_key"
 
+# ── 別名シーケンス定義 ────────────────────────────────────────────────────────
+# グリッドや chord の output フィールドで `ku_ret` / `to_ret` を参照できます。
+[[alias]]
+ku_ret = "、 !Return"
+to_ret = "。 !Return"
+
 # ── Base layer ────────────────────────────────────────────────────────────────
 [[layer]]
 id   = "base"

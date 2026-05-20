@@ -21,6 +21,10 @@ pub struct LayoutFile {
     pub chord: Vec<ChordRule>,
     #[serde(default)]
     pub direct: Vec<DirectRule>,
+    /// Named output sequences, e.g. `ku_ret = "、 !Enter"`.
+    /// Each `[[alias]]` table contributes zero or more name→sequence pairs.
+    #[serde(default)]
+    pub alias: Vec<HashMap<String, String>>,
 }
 
 // ── Meta ──────────────────────────────────────────────────────────────────────
@@ -296,16 +300,16 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
     let mut explicit_keys: Option<Vec<String>> = None;
 
     for line in &lines[1..] {
-        let cols: Vec<&str> = line.split_whitespace().collect();
+        let cols = tokenize_grid_row(line);
         if cols.len() < 2 {
             continue;
         }
 
-        let row_label = cols[0];
+        let row_label = cols[0].as_str();
 
         // A line starting with `.` is a new explicit key header
         if row_label == "." {
-            explicit_keys = Some(cols[1..].iter().map(|s| s.to_string()).collect());
+            explicit_keys = Some(cols[1..].to_vec());
             continue;
         }
 
@@ -327,18 +331,54 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
         };
 
         let values = &cols[1..];
-        for (i, kana) in values.iter().enumerate() {
+        for (i, value) in values.iter().enumerate() {
             if i >= key_row.len() || i >= col_count {
                 break;
             }
-            if *kana == "＿" || *kana == "." || kana.is_empty() {
+            if *value == "＿" || *value == "." || value.is_empty() {
                 continue;
             }
-            map.insert(key_row[i].to_string(), kana.to_string());
+            map.insert(key_row[i].to_string(), value.to_string());
         }
     }
 
     Ok(map)
+}
+
+/// Split a grid data row into cell tokens, respecting `"..."` quoted strings
+/// (which may contain spaces and represent multi-token output sequences).
+///
+/// Example: `1 あ "、 !Enter" か` → `["1", "あ", "、 !Enter", "か"]`
+pub(crate) fn tokenize_grid_row(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = s.chars().peekable();
+
+    loop {
+        // Skip whitespace between tokens
+        while chars.peek().map_or(false, |c| c.is_ascii_whitespace()) {
+            chars.next();
+        }
+        match chars.peek() {
+            None => break,
+            Some('"') => {
+                chars.next(); // consume opening quote
+                let mut tok = String::new();
+                for c in chars.by_ref() {
+                    if c == '"' { break; }
+                    tok.push(c);
+                }
+                tokens.push(tok);
+            }
+            _ => {
+                let mut tok = String::new();
+                while chars.peek().map_or(false, |c| !c.is_ascii_whitespace()) {
+                    tok.push(chars.next().unwrap());
+                }
+                tokens.push(tok);
+            }
+        }
+    }
+    tokens
 }
 
 // ── Layout (compiled) ─────────────────────────────────────────────────────────
@@ -350,16 +390,18 @@ pub struct Layout {
     pub settings: Settings,
     pub modifiers: Vec<ModifierDef>,
     pub direct_trigger: Option<DirectTriggerDef>,
-    /// base layer grid: key_id → kana
+    /// base layer grid: key_id → raw output string
     pub base_layer: HashMap<String, String>,
-    /// prefix layers: trigger_key → (key_id → kana)
+    /// prefix layers: trigger_key → (key_id → raw output string)
     pub prefix_layers: Vec<(String, HashMap<String, String>)>,
-    /// postfix layers: trigger_key → (key_id → kana)
+    /// postfix layers: trigger_key → (key_id → raw output string)
     pub postfix_layers: Vec<(String, HashMap<String, String>)>,
-    /// modified layers: modifier_id → (key_id → kana)
+    /// modified layers: modifier_id → (key_id → raw output string)
     pub modified_layers: Vec<(String, HashMap<String, String>)>,
     pub chords: Vec<ChordRule>,
     pub directs: Vec<DirectRule>,
+    /// Named output sequences: alias_name → Vec of output tokens
+    pub aliases: HashMap<String, Vec<String>>,
 }
 
 impl Layout {
@@ -405,6 +447,15 @@ impl Layout {
             }
         }
 
+        // Flatten all [[alias]] tables into a single map
+        let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
+        for alias_table in &file.alias {
+            for (name, seq_str) in alias_table {
+                let tokens = seq_str.split_whitespace().map(|s| s.to_string()).collect();
+                aliases.insert(name.clone(), tokens);
+            }
+        }
+
         let layout = Layout {
             meta: file.meta.clone(),
             settings: file.settings.clone(),
@@ -416,6 +467,7 @@ impl Layout {
             modified_layers,
             chords: file.chord.clone(),
             directs: file.direct.clone(),
+            aliases,
         };
 
         layout.validate()?;
