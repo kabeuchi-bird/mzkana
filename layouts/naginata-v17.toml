@@ -1,0 +1,86 @@
+# ============================================================
+# 薙刀式 v17（センターシフト + 相互シフト）
+# ============================================================
+
+[meta]
+name    = "薙刀式v17"
+version = "1.0"
+mode    = "kana"
+schema  = 1
+
+[settings]
+chord_window_ms    = 50
+mutual_window_ms   = 80
+caps_lock_behavior = "shift"
+on_focus_change    = "preserve"
+roll_over          = true
+
+# ── センターシフト定義 ────────────────────────────────────────────────────────
+[[modifier]]
+id              = "center"
+key             = "space"
+kind            = "hold"
+hold_detection  = "interrupt"
+hold_timeout_ms = 150
+tap_action      = "send_key"
+
+# ── Base layer ────────────────────────────────────────────────────────────────
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q    w    e    r    t    y    u    i    o    p
+1 ば   く   て   し   ょ   ん   か   た   こ   さ
+2 ぱ   と   に   い   り   の   す   き   る   ち
+3 ．   ．   な   っ   ず   ら   う   お   つ   ．
+"""
+
+# ── センターシフト層 ──────────────────────────────────────────────────────────
+[[layer]]
+id       = "center_shift"
+kind     = "modified"
+modifier = "center"
+grid     = """
+. q    w    e    r    t    y    u    i    o    p
+1 ぁ   へ   め   は   ぬ   む   あ   れ   そ   え
+2 ぇ   ほ   ひ   を   せ   ね   で   も   わ   ゅ
+3 ．   ．   ふ   ゃ   ぐ   げ   け   ろ   よ   ．
+"""
+
+# ── 相互シフト（濁音・拗音など） ──────────────────────────────────────────────
+
+[[chord]]
+keys      = ["a", "s"]
+output    = "ざ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["s", "d"]
+output    = "じ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["d", "f"]
+output    = "ず"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["j", "k"]
+output    = "が"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["k", "l"]
+output    = "ぎ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["f", "j"]
+output    = "っ"
+symmetric = true
+window_ms = 80

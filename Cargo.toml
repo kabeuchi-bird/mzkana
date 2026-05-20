@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/mzkana-core",
+    "crates/mzkana-cli",
+]
+resolver = "2"

@@ -1,0 +1,68 @@
+version: "2"
+
+language: "ja"
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  path_instructions:
+    - path: "crates/mzkana-core/src/statemachine.rs"
+      instructions: |
+        状態機械の核心コードです。以下の観点を重点的にレビューしてください。
+        - speculative execution と BS-rewrite の一貫性（tentative_buffer と Mozc preedit の同期）
+        - chord_window_ms/mutual_window_ms のタイマー処理の正確さ
+        - pending_keys の不変条件（leakしていないか）
+        - kanchoku モード中に speculative 送信が発生しないこと（silent 動作）
+        - CONVERSION モード遷移時に tentative_buffer が適切にクリアされること
+
+    - path: "crates/mzkana-core/src/config.rs"
+      instructions: |
+        設定パーサーです。以下を確認してください。
+        - グリッド文字列のパース（QWERTY 行マッピング、プレースホルダセルのスキップ）
+        - 競合検出ロジック（同一 context での出力相違）
+        - serde/schemars derive の正確さ（フィールド名の snake_case 変換）
+        - エラーメッセージの明確さ
+
+    - path: "layouts/*.toml"
+      instructions: |
+        配列定義ファイルです。以下を確認してください。
+        - グリッドのセル数が列ヘッダと一致しているか
+        - chord の keys が base layer に存在するキーを参照しているか
+        - direct の sequence が重複なく定義されているか
+        - mode フィールドが配列の特性に合っているか（kana/kanchoku/hybrid）
+
+    - path: "crates/mzkana-core/src/tests.rs"
+      instructions: |
+        テストコードです。以下を確認してください。
+        - テストが設計書（mzkana-design.md）の付録 B に記載された動作トレースと一致しているか
+        - 境界ケース（chord_window 境界、empty tentative_buffer、CONVERSION 後の入力）のカバレッジ
+        - テスト名が日本語のドメイン概念を適切に表しているか
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: "local"
+
+  issues:
+    scope: "local"
+
+  jira:
+    project_keys: []
+
+  linear:
+    team_keys: []

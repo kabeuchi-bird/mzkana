@@ -1,0 +1,70 @@
+# ============================================================
+# T-code（2ストローク漢直）
+# ============================================================
+
+[meta]
+name    = "T-code"
+version = "1.0"
+mode    = "kanchoku"
+schema  = 1
+
+[settings]
+chord_window_ms    = 50
+caps_lock_behavior = "ignore"
+on_focus_change    = "preserve"
+roll_over          = false
+
+# T-code は全エントリが [[direct]] 扱い（mode = "kanchoku"）
+# ここではよく使う文字のサブセットを収録（例示用）
+
+[[direct]]
+sequence = ["k", "j"]
+output   = "日"
+
+[[direct]]
+sequence = ["f", "j"]
+output   = "本"
+
+[[direct]]
+sequence = ["d", "j"]
+output   = "語"
+
+[[direct]]
+sequence = ["s", "j"]
+output   = "人"
+
+[[direct]]
+sequence = ["a", "j"]
+output   = "国"
+
+[[direct]]
+sequence = ["k", "h"]
+output   = "年"
+
+[[direct]]
+sequence = ["f", "h"]
+output   = "月"
+
+[[direct]]
+sequence = ["d", "h"]
+output   = "日"
+
+[[direct]]
+sequence = ["j", "k"]
+output   = "一"
+
+[[direct]]
+sequence = ["j", "f"]
+output   = "二"
+
+[[direct]]
+sequence = ["j", "d"]
+output   = "三"
+
+[[direct]]
+sequence = ["j", "s"]
+output   = "四"
+
+[[direct]]
+sequence = ["j", "a"]
+output   = "五"
