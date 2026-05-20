@@ -331,7 +331,7 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
             if i >= key_row.len() || i >= col_count {
                 break;
             }
-            if *kana == "." || kana.is_empty() {
+            if *kana == "＿" || *kana == "." || kana.is_empty() {
                 continue;
             }
             map.insert(key_row[i].to_string(), kana.to_string());
