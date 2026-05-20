@@ -508,6 +508,24 @@ impl Layout {
                     m.id
                 )));
             }
+            if m.tap_output.is_some() && m.tap_action != TapAction::Output {
+                return Err(ConfigError::GridParse(format!(
+                    "modifier '{}': tap_output is set but tap_action is not \"output\"; \
+                     remove tap_output or set tap_action = \"output\"",
+                    m.id
+                )));
+            }
+        }
+        // BaseKana and Output have no effect on direct triggers (statemachine silently
+        // ignores them). Reject them early so authors get a clear error.
+        if let Some(ref dt) = self.direct_trigger {
+            if matches!(dt.tap_action, TapAction::BaseKana | TapAction::Output) {
+                return Err(ConfigError::GridParse(format!(
+                    "direct_trigger: tap_action = {:?} is not supported; \
+                     use \"passthrough\" or \"none\"",
+                    dt.tap_action
+                )));
+            }
         }
         Ok(())
     }
