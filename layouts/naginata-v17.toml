@@ -3,8 +3,8 @@
 # ============================================================
 
 [meta]
-name    = "薙刀式v17"
-version = "1.0"
+name    = "薙刀式"
+version = "17.0"
 mode    = "kana"
 schema  = 1
 
@@ -30,9 +30,9 @@ id   = "base"
 kind = "single"
 grid = """
 . q    w    e    r    t    y    u    i    o    p
-1 ば   く   て   し   ょ   ん   か   た   こ   さ
-2 ぱ   と   に   い   り   の   す   き   る   ち
-3 ．   ．   な   っ   ず   ら   う   お   つ   ．
+1 ．   き   て   し   ．   ．   ．   る   す   へ
+2 ろ   け   と   か   っ   く   あ   い   う   ー
+3 ほ   ひ   は   こ   そ   た   な   ん   ら   れ
 """
 
 # ── センターシフト層 ──────────────────────────────────────────────────────────
@@ -42,45 +42,45 @@ kind     = "modified"
 modifier = "center"
 grid     = """
 . q    w    e    r    t    y    u    i    o    p
-1 ぁ   へ   め   は   ぬ   む   あ   れ   そ   え
-2 ぇ   ほ   ひ   を   せ   ね   で   も   わ   ゅ
-3 ．   ．   ふ   ゃ   ぐ   げ   け   ろ   よ   ．
+1 ．   め   り   ね   ．   ．   さ   よ   え   ゆ
+2 せ   み   に   ま   ち   や   の   も   つ   ふ
+3 ほ   ひ   を   、   ぬ   お   。   む   わ   れ
 """
 
 # ── 相互シフト（濁音・拗音など） ──────────────────────────────────────────────
 
 [[chord]]
-keys      = ["a", "s"]
-output    = "ざ"
-symmetric = true
-window_ms = 80
-
-[[chord]]
-keys      = ["s", "d"]
-output    = "じ"
-symmetric = true
-window_ms = 80
-
-[[chord]]
-keys      = ["d", "f"]
-output    = "ず"
-symmetric = true
-window_ms = 80
-
-[[chord]]
-keys      = ["j", "k"]
+keys      = ["f", "j"]
 output    = "が"
 symmetric = true
 window_ms = 80
 
 [[chord]]
-keys      = ["k", "l"]
-output    = "ぎ"
+keys      = ["r", "j"]
+output    = "じ"
 symmetric = true
 window_ms = 80
 
 [[chord]]
-keys      = ["f", "j"]
-output    = "っ"
+keys      = ["v", "j"]
+output    = "ご"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["e", "j"]
+output    = "で"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["d", "j"]
+output    = "ど"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["c", "j"]
+output    = "ば"
 symmetric = true
 window_ms = 80
