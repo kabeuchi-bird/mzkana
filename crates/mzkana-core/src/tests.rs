@@ -136,16 +136,15 @@ fn chord_rewrite() {
 fn chord_symmetric_either_order() {
     let mut m = sm(NAGINATA);
     let now = Instant::now();
-    // [[chord]] keys=["a","s"] symmetric=true output="ざ"
-    // Try s first, then a
-    let a1 = m.process(InputEvent::down("s"), now);
-    // s in naginata base (row2 col1 = a? no... row2: a,s,d,f,g,h,j,k,l,semicolon)
-    // base row2: は,と,に,い,り,の,す,き,る,ち -> a=は
-    // So s→と
+    // [[chord]] keys=["f","j"] symmetric=true output="が"
+    // Try j first, then f (reverse order from definition)
+    let a1 = m.process(InputEvent::down("j"), now);
+    // base row2: a=ろ s=け d=と f=か g=っ h=く j=あ …
+    // So j → あ speculatively
     assert!(!a1.is_empty());
-    let a2 = m.process(InputEvent::down("a"), now);
+    let a2 = m.process(InputEvent::down("f"), now);
     assert!(a2.contains(&OutputAction::Backspace));
-    assert!(a2.contains(&OutputAction::SendKana("ざ".to_string())));
+    assert!(a2.contains(&OutputAction::SendKana("が".to_string())));
 }
 
 // ── Kanchoku / T-code ─────────────────────────────────────────────────────────
@@ -198,11 +197,11 @@ fn backspace_pops_tentative() {
 fn center_shift_modifier_layer() {
     let mut m = sm(NAGINATA);
     let now = Instant::now();
-    // Hold space (center modifier), then press q
+    // Hold space (center modifier), then press w
     m.process(InputEvent::down("space"), now);
-    let a = m.process(InputEvent::down("q"), now);
-    // center_shift layer row1 q → ぁ
-    assert!(a.contains(&OutputAction::SendKana("ぁ".to_string())));
+    let a = m.process(InputEvent::down("w"), now);
+    // center_shift layer row1 w → め
+    assert!(a.contains(&OutputAction::SendKana("め".to_string())));
 }
 
 // ── Conflict detection ────────────────────────────────────────────────────────
