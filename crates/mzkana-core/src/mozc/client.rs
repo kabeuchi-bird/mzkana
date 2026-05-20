@@ -11,10 +11,14 @@ use super::proto::{
 };
 use super::MozcOutput;
 
+/// Maximum accepted response frame size (1 MiB). Responses larger than this
+/// are rejected to prevent allocation of attacker-controlled memory.
+const MAX_FRAME_SIZE: usize = 1024 * 1024;
+
 /// Default path to the Mozc server socket.
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    PathBuf::from(home).join(".mozc").join("server.sock")
+    PathBuf::from(home).join(".mozc").join("session.sock")
 }
 
 #[derive(Debug)]
@@ -79,6 +83,11 @@ impl MozcClient {
         let mut len_buf = [0u8; 4];
         self.stream.read_exact(&mut len_buf)?;
         let resp_len = u32::from_le_bytes(len_buf) as usize;
+        if resp_len > MAX_FRAME_SIZE {
+            return Err(MozcError::Protocol(format!(
+                "response frame too large: {resp_len} > {MAX_FRAME_SIZE}"
+            )));
+        }
         let mut resp_buf = vec![0u8; resp_len];
         self.stream.read_exact(&mut resp_buf)?;
         let out = decode_response(&resp_buf)?;
@@ -138,6 +147,45 @@ impl MozcClient {
         let sid = self.sid()?;
         let out = self.send_recv(&input_send_special(sid, special_key::ENTER))?;
         Ok(MozcOutput::from_decoded(out))
+    }
+
+    /// Send a function key by its XKB keysym name (e.g. `"Return"`, `"Up"`, `"F1"`).
+    /// Returns `Err(Protocol)` for names that have no Mozc SpecialKey mapping.
+    pub fn send_function_key(&mut self, name: &str) -> Result<MozcOutput, MozcError> {
+        let code = xkb_name_to_mozc_special(name).ok_or_else(|| {
+            MozcError::Protocol(format!("no Mozc SpecialKey for function key: {name}"))
+        })?;
+        let sid = self.sid()?;
+        let out = self.send_recv(&input_send_special(sid, code))?;
+        Ok(MozcOutput::from_decoded(out))
+    }
+}
+
+/// Map an XKB keysym name (as used after `!` in layout files) to a Mozc SpecialKey value.
+pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
+    match name {
+        "Return"              => Some(special_key::ENTER),
+        "Tab"                 => Some(special_key::TAB),
+        "Escape"              => Some(special_key::ESCAPE),
+        "BackSpace"           => Some(special_key::BACKSPACE),
+        "Delete"              => Some(special_key::DEL),
+        "Insert"              => Some(special_key::INSERT),
+        "Home"                => Some(special_key::HOME),
+        "End"                 => Some(special_key::END),
+        "Up"                  => Some(special_key::UP),
+        "Down"                => Some(special_key::DOWN),
+        "Left"                => Some(special_key::LEFT),
+        "Right"               => Some(special_key::RIGHT),
+        "Prior" | "PageUp"    => Some(special_key::PAGE_UP),
+        "Next"  | "PageDown"  => Some(special_key::PAGE_DOWN),
+        "space"               => Some(special_key::SPACE),
+        "Henkan"              => Some(special_key::HENKAN),
+        "Hiragana_Katakana"   => Some(special_key::KANA),
+        // F1–F12: SpecialKey values 19–30
+        s if s.starts_with('F') => s[1..].parse::<u64>().ok()
+            .filter(|&n| n >= 1 && n <= 12)
+            .map(|n| 18 + n),
+        _ => None,
     }
 }
 

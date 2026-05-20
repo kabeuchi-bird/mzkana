@@ -26,20 +26,24 @@ pub mod session_cmd {
 /// KeyEvent.SpecialKey
 #[allow(dead_code)]
 pub mod special_key {
-    pub const BACKSPACE: u64 = 12;
-    pub const ENTER: u64 = 5;
     pub const SPACE: u64 = 4;
-    pub const ESCAPE: u64 = 10;
-    pub const TAB: u64 = 18;
+    pub const ENTER: u64 = 5;
     pub const LEFT: u64 = 6;
     pub const RIGHT: u64 = 7;
     pub const UP: u64 = 8;
     pub const DOWN: u64 = 9;
+    pub const ESCAPE: u64 = 10;
     pub const DEL: u64 = 11;
+    pub const BACKSPACE: u64 = 12;
+    pub const HENKAN: u64 = 13;
+    pub const KANA: u64 = 15;   // Hiragana_Katakana
     pub const HOME: u64 = 16;
     pub const END: u64 = 17;
+    pub const TAB: u64 = 18;
+    // F1=19 … F12=30
     pub const PAGE_UP: u64 = 31;
     pub const PAGE_DOWN: u64 = 32;
+    pub const INSERT: u64 = 33;
 }
 
 /// KeyEvent.InputStyle
@@ -165,11 +169,10 @@ pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::Decod
     let cmd_fields = decode(data)?;
 
     // Command.output = field 2
-    let out_fields = match find_msg(&cmd_fields, 2) {
+    let out_fields = match find_msg(&cmd_fields, 2)? {
         Some(f) => f,
         None => {
-            // CREATE_SESSION returns Command.output.id — try field 2 anyway
-            // Also decode top-level for CREATE_SESSION which returns id directly
+            // No output field: fallback for unexpected responses
             return Ok(DecodedOutput {
                 session_id: find_varint(&cmd_fields, 1),
                 ..Default::default()
@@ -186,17 +189,17 @@ pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::Decod
     // Output.consumed = 3
     out.consumed = find_varint(&out_fields, 3).map(|v| v != 0).unwrap_or(false);
     // Output.result = 4
-    if let Some(result_fields) = find_msg(&out_fields, 4) {
+    if let Some(result_fields) = find_msg(&out_fields, 4)? {
         // Result.value = 2
         if let Some(val) = find_bytes(&result_fields, 2) {
             out.result_value = String::from_utf8(val.to_vec()).ok();
         }
     }
     // Output.preedit = 5
-    if let Some(pre_fields) = find_msg(&out_fields, 5) {
+    if let Some(pre_fields) = find_msg(&out_fields, 5)? {
         // Preedit.Segment is a proto2 group at field 2.
         // Within the group: annotation=3, value=4
-        let segs = find_all_msg(&pre_fields, 2);
+        let segs = find_all_msg(&pre_fields, 2)?;
         let mut preedit = String::new();
         for seg in &segs {
             if let Some(v) = find_bytes(seg, 4) {

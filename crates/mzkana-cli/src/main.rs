@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use mzkana_core::{load_layout, InputEvent, MozcClient, MozcOutput, OutputAction, StateMachine};
+use mzkana_core::{
+    load_layout, InputEvent, MozcClient, MozcOutput, OutputAction, StateMachine,
+};
+use mzkana_core::mozc::client::xkb_name_to_mozc_special;
 
 #[derive(Parser)]
 #[command(name = "mzkana", about = "MzKana layout tool")]
@@ -236,13 +239,31 @@ fn dispatch_to_mozc(mozc: &mut MozcClient, action: &OutputAction) -> Option<Mozc
                 Err(e) => { eprintln!("[mozc error] {e}"); None }
             }
         }
-        // CommitDirect / SubmitAndCommit: kanchoku paths — also submit preedit
+        // SubmitAndCommit: flush Mozc preedit then commit kanchoku result directly
         OutputAction::SubmitAndCommit(s) => {
-            let _ = mozc.submit();
-            println!("commit_direct({s})");
-            None
+            match mozc.submit() {
+                Ok(out) => {
+                    println!("commit_direct({s})");
+                    Some(out)
+                }
+                Err(e) => {
+                    eprintln!("[mozc error] submit failed before kanchoku commit: {e}");
+                    None
+                }
+            }
         }
-        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) | OutputAction::SendFunctionKey(_) => None,
+        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) => None,
+        OutputAction::SendFunctionKey(name) => {
+            if xkb_name_to_mozc_special(name).is_none() {
+                // Keys with no Mozc mapping (e.g. Muhenkan) are passed through;
+                // Mozc would ignore them anyway.
+                return None;
+            }
+            match mozc.send_function_key(name) {
+                Ok(out) => Some(out),
+                Err(e) => { eprintln!("[mozc error] {e}"); None }
+            }
+        }
     }
 }
 

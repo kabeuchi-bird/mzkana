@@ -66,14 +66,14 @@ cargo run -p mzkana-cli -- schema
 
 ### `run` の出力例
 
-```
+```text
 send_kana(か)
 send_kana(た)
 ```
 
 ### `mozc-run` の出力例（mozc_server 起動済みの場合）
 
-```
+```text
 Connected to Mozc (session 1)
 send_kana(か)
   → preedit: か

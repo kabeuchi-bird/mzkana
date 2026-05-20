@@ -173,50 +173,35 @@ pub fn find_bytes<'a>(fields: &'a [Field], field_num: u32) -> Option<&'a [u8]> {
 }
 
 /// Find the first field with the given number and return nested group/message fields.
-pub fn find_msg<'a>(fields: &'a [Field], field_num: u32) -> Option<Vec<Field>> {
-    fields.iter().find_map(|(n, v)| {
-        if *n == field_num {
-            match v {
-                Value::Bytes(b) => decode(b).ok(),
-                Value::Group(g) => Some(g.clone()),
-                _ => None,
-            }
-        } else {
-            None
+/// Returns `Err` if the field is present but its bytes cannot be decoded.
+pub fn find_msg(fields: &[Field], field_num: u32) -> Result<Option<Vec<Field>>, DecodeError> {
+    for (n, v) in fields {
+        if *n != field_num {
+            continue;
         }
-    })
-}
-
-/// Collect all occurrences of a field number as byte slices (for repeated
-/// length-delimited fields).
-#[allow(dead_code)]
-pub fn find_all_bytes<'a>(fields: &'a [Field], field_num: u32) -> Vec<&'a [u8]> {
-    fields
-        .iter()
-        .filter_map(|(n, v)| {
-            if *n == field_num {
-                if let Value::Bytes(b) = v { Some(b.as_slice()) } else { None }
-            } else {
-                None
-            }
-        })
-        .collect()
+        return match v {
+            Value::Bytes(b) => decode(b).map(Some),
+            Value::Group(g) => Ok(Some(g.clone())),
+            _ => Ok(None),
+        };
+    }
+    Ok(None)
 }
 
 /// Collect all occurrences of a field number as group/message field vectors.
-pub fn find_all_msg(fields: &[Field], field_num: u32) -> Vec<Vec<Field>> {
-    fields
-        .iter()
-        .filter_map(|(n, v)| {
-            if *n == field_num {
-                match v {
-                    Value::Bytes(b) => decode(b).ok(),
-                    Value::Group(g) => Some(g.clone()),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-        .collect()
+/// Returns `Err` if any occurrence fails to decode.
+pub fn find_all_msg(fields: &[Field], field_num: u32) -> Result<Vec<Vec<Field>>, DecodeError> {
+    let mut out = Vec::new();
+    for (n, v) in fields {
+        if *n != field_num {
+            continue;
+        }
+        let decoded = match v {
+            Value::Bytes(b) => decode(b)?,
+            Value::Group(g) => g.clone(),
+            _ => continue,
+        };
+        out.push(decoded);
+    }
+    Ok(out)
 }
