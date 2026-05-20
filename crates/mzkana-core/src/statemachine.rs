@@ -98,6 +98,8 @@ struct ModifierState {
     pressed_at: Instant,
     /// Oneshot mode: true after press, cleared after the next non-modifier key.
     oneshot_pending: bool,
+    /// Toggle mode: true when the layer is toggled on (sticky).
+    toggled: bool,
 }
 
 /// State of the direct trigger.
@@ -133,6 +135,7 @@ impl StateMachine {
                 interrupted: false,
                 pressed_at: Instant::now(),
                 oneshot_pending: false,
+                toggled: false,
             })
             .collect();
 
@@ -159,6 +162,7 @@ impl StateMachine {
             ms.held = false;
             ms.interrupted = false;
             ms.oneshot_pending = false;
+            ms.toggled = false;
         }
         self.direct_trigger_state = DirectTriggerState::Inactive;
         self.direct_trigger_held = false;
@@ -209,10 +213,16 @@ impl StateMachine {
             let kind = self.layout.modifiers[idx].kind;
             self.modifier_states[idx].interrupted = false;
             self.modifier_states[idx].pressed_at = now;
-            if kind == ModifierKind::Oneshot {
-                self.modifier_states[idx].oneshot_pending = true;
-            } else {
-                self.modifier_states[idx].held = true;
+            match kind {
+                ModifierKind::Toggle => {
+                    self.modifier_states[idx].toggled ^= true;
+                }
+                ModifierKind::Oneshot => {
+                    self.modifier_states[idx].oneshot_pending = true;
+                }
+                ModifierKind::Hold => {
+                    self.modifier_states[idx].held = true;
+                }
             }
             return Vec::new();
         }
@@ -276,34 +286,46 @@ impl StateMachine {
     fn process_key_up(&mut self, key: &str, now: Instant) -> Vec<OutputAction> {
         // Modifier key released
         if let Some(idx) = self.modifier_index(key) {
+            let kind = self.layout.modifiers[idx].kind;
+
+            // Toggle modifiers have no tap action — the toggle happened on key-down.
+            if kind == ModifierKind::Toggle {
+                return Vec::new();
+            }
+
             let was_interrupted = self.modifier_states[idx].interrupted;
             let had_oneshot = self.modifier_states[idx].oneshot_pending;
             self.modifier_states[idx].held = false;
             self.modifier_states[idx].oneshot_pending = false;
 
-            let modifier_def = &self.layout.modifiers[idx];
+            let modifier_def = self.layout.modifiers[idx].clone();
             // Tap action fires when key was released without triggering anything
             if !was_interrupted && !had_oneshot {
                 match modifier_def.tap_action {
-                    TapAction::SendKey | TapAction::Passthrough => {
+                    TapAction::Passthrough => {
                         return vec![OutputAction::Passthrough(key.to_string())];
                     }
                     TapAction::BaseKana => {
-                        // Dual-role: tap emits the base-layer kana for this key.
-                        if let Some(kana) = self.lookup_base(key) {
-                            let action = Self::make_output_action(&kana);
-                            let is_fkey = matches!(action, OutputAction::SendFunctionKey(_));
-                            let out = vec![action];
-                            if !is_fkey {
-                                self.tentative_buffer.push(TentativeChar {
-                                    kana: kana.clone(),
-                                    source_keys: vec![key.to_string()],
-                                    sent_at: now,
-                                    rewrite_deadline: None,
-                                    pending_tail: Vec::new(),
-                                });
-                            }
-                            return out;
+                        // Dual-role: resolve base-layer value through alias/sequence pipeline.
+                        if let Some(raw) = self.lookup_base(key) {
+                            let tokens: Vec<String> = self
+                                .resolve_sequence(&raw)
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect();
+                            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+                            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
+                        }
+                    }
+                    TapAction::Output => {
+                        if let Some(raw) = modifier_def.tap_output.as_deref() {
+                            let tokens: Vec<String> = self
+                                .resolve_sequence(raw)
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect();
+                            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+                            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
                         }
                     }
                     TapAction::None => {}
@@ -647,11 +669,11 @@ impl StateMachine {
 
         if !was_interrupted {
             match tap_action {
-                TapAction::Passthrough | TapAction::SendKey => {
+                TapAction::Passthrough => {
                     return vec![OutputAction::Passthrough(key.to_string())];
                 }
-                // BaseKana is only meaningful for modifier keys, not direct triggers.
-                TapAction::BaseKana | TapAction::None => {}
+                // BaseKana / Output / None are not meaningful for direct triggers.
+                TapAction::BaseKana | TapAction::Output | TapAction::None => {}
             }
         }
         Vec::new()
@@ -687,7 +709,7 @@ impl StateMachine {
 
     fn check_modified_layer(&self, key: &str, now: Instant) -> Option<String> {
         for (ms, mod_def) in self.modifier_states.iter().zip(self.layout.modifiers.iter()) {
-            let active = if ms.oneshot_pending {
+            let active = if ms.oneshot_pending || ms.toggled {
                 true
             } else if ms.held {
                 match mod_def.hold_detection {
