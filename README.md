@@ -8,7 +8,8 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 - **配列不問** — TOML 設定ファイルを差し替えるだけで任意のかな配列を使用できます
 - **6 つのシフト方式に対応** — 通常シフト / 同時シフト / 前置シフト / 後置シフト / 相互シフト / センターシフト
 - **漢直サポート** — T-code / TUT-code など 2 ストローク漢字直接入力に対応
-- **投機的送信** — 入力をリアルタイムに Mozc へ送り、後から確定・書き換え
+- **投機的送信** — 入力をリアルタイムに Mozc へ送り、後から確定・書き換え（BS-rewrite）
+- **Mozc IPC クライアント** — Unix ドメインソケット経由で mozc_server に直接接続
 - **機能キー出力** — `!Return` / `!Tab` など機能キーをグリッドや chord に埋め込み可能
 - **エイリアス / 複数トークン出力** — `[[alias]]` で名前付きシーケンスを定義し、グリッドや chord から参照
 
@@ -17,14 +18,15 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 ```
 mzkana/
 ├── crates/
-│   ├── mzkana-core/   # 状態機械・設定パーサ（ライブラリ）
-│   └── mzkana-cli/    # 検証・デバッグ用 CLI ツール
-├── layouts/           # サンプル配列定義
-│   ├── tsuki-2-263.toml   # 月配列 2-263 式（前置シフト）
-│   ├── shin-geta.toml     # 新下駄配列（同時シフト）
-│   ├── naginata-v17.toml  # 薙刀式 v17（センターシフト + 相互シフト）
-│   └── t-code.toml        # T-code（漢直）
-└── schemas/           # JSON Schema（エディタ補完用）
+│   ├── mzkana-core/        # 状態機械・設定パーサ・Mozc IPCクライアント（ライブラリ）
+│   │   └── src/mozc/       # protobufコーデック + UDSクライアント
+│   └── mzkana-cli/         # 検証・デバッグ用 CLI ツール
+├── layouts/                # サンプル配列定義
+│   ├── tsuki-2-263.toml    # 月配列 2-263 式（前置シフト）
+│   ├── shin-geta.toml      # 新下駄配列（同時シフト）
+│   ├── naginata-v17.toml   # 薙刀式 v17（センターシフト + 相互シフト）
+│   └── t-code.toml         # T-code（漢直）
+└── schemas/                # JSON Schema（エディタ補完用）
 ```
 
 ## ビルド
@@ -32,6 +34,9 @@ mzkana/
 ```sh
 cargo build
 ```
+
+Mozc のインストールは不要でビルドできます。  
+`mozc-run` サブコマンドの実行時のみ `mozc_server` の起動が必要です。
 
 ## CLI ツール
 
@@ -42,14 +47,38 @@ cargo run -p mzkana-cli -- validate layouts/tsuki-2-263.toml
 # キーシーケンスを流して出力アクションを確認
 cargo run -p mzkana-cli -- run layouts/tsuki-2-263.toml --keys "d w"
 
-# コードを同時押し（+）で表現
+# 同時押し（+）でコードを表現
 cargo run -p mzkana-cli -- run layouts/shin-geta.toml --keys "f+j"
 
 # キーアップを ^ で表現
 cargo run -p mzkana-cli -- run layouts/naginata-v17.toml --keys "space q space^"
 
+# Mozc サーバに接続してキーシーケンスを送り、preedit/result を確認
+cargo run -p mzkana-cli -- mozc-run layouts/naginata-v17.toml --keys "k a s d"
+
+# Mozc ソケットのパスを明示する場合
+cargo run -p mzkana-cli -- mozc-run layouts/naginata-v17.toml \
+    --socket ~/.mozc/server.sock --keys "k a s d"
+
 # JSON Schema を出力（エディタの補完設定に利用）
 cargo run -p mzkana-cli -- schema
+```
+
+### `run` の出力例
+
+```text
+send_kana(か)
+send_kana(た)
+```
+
+### `mozc-run` の出力例（mozc_server 起動済みの場合）
+
+```text
+Connected to Mozc (session 1)
+send_kana(か)
+  → preedit: か
+send_kana(た)
+  → preedit: かた
 ```
 
 ## 配列ファイル形式
@@ -147,11 +176,31 @@ output   = "日"
 `Prior` / `Next` / `PageUp` / `PageDown` /
 `F1`–`F12` / `space` / `Henkan` / `Muhenkan` / `Hiragana_Katakana`
 
+## Mozc IPC について
+
+`mzkana-core` は Mozc の `commands.proto` を使って `mozc_server` と直接通信します。
+
+- **接続先**: `~/.mozc/server.sock`（`--socket` で変更可）
+- **プロトコル**: `uint32_le(メッセージ長) + protobuf バイト列`（双方向）
+- **外部依存**: prost / protoc 不要（Mozc の proto2 group 型に対応した独自コーデックを内蔵）
+- **セッション管理**: 接続時に `CREATE_SESSION`、切断時に `DELETE_SESSION` を自動実行
+
+## 実装フェーズ
+
+| Phase | 内容 | 状態 |
+|---|---|---|
+| 1 | 状態機械・設定パーサ・CLI（全シフト方式・漢直） | ✅ 完了 |
+| 2 | Mozc IPC クライアント・`mozc-run` サブコマンド | ✅ 完了 |
+| 3 | Fcitx5 アドオン化（C++ シム + preedit 同期） | 未着手 |
+| 4 | 設定 GUI（egui） | 未着手 |
+
 ## テスト
 
 ```sh
 cargo test
 ```
+
+57 件のテストがあります。Mozc のインストールは不要です。
 
 ## ライセンス
 
