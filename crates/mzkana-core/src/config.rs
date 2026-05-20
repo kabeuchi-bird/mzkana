@@ -452,7 +452,14 @@ impl Layout {
         let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
         for alias_table in &file.alias {
             for (name, seq_str) in alias_table {
-                let tokens = seq_str.split_whitespace().map(|s| s.to_string()).collect();
+                let tokens: Vec<String> =
+                    seq_str.split_whitespace().map(|s| s.to_string()).collect();
+                if tokens.is_empty() {
+                    return Err(ConfigError::MissingField(format!(
+                        "alias '{name}' has an empty sequence; \
+                         at least one token is required"
+                    )));
+                }
                 aliases.insert(name.clone(), tokens);
             }
         }
@@ -483,6 +490,7 @@ impl Layout {
     }
 
     fn check_function_key_names(&self) -> Result<()> {
+        // Collect every raw output string from all rule sources.
         let all_outputs = self
             .chords
             .iter()
@@ -505,8 +513,18 @@ impl Layout {
                     .flat_map(|(_, g)| g.values().map(String::as_str)),
             );
 
-        for output in all_outputs {
-            if let Some(key_name) = output.strip_prefix('!') {
+        // Each raw output may be a multi-token sequence (space-separated).
+        // Alias values are also validated (they may contain !-prefixed tokens).
+        let alias_tokens = self
+            .aliases
+            .values()
+            .flat_map(|tokens| tokens.iter().map(String::as_str));
+
+        for token in all_outputs
+            .flat_map(|s| s.split_whitespace())
+            .chain(alias_tokens)
+        {
+            if let Some(key_name) = token.strip_prefix('!') {
                 if !VALID_FUNCTION_KEYS.contains(key_name) {
                     return Err(ConfigError::GridParse(format!(
                         "unknown function key '!{key_name}'; \

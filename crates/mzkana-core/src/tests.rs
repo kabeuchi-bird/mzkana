@@ -365,6 +365,60 @@ output = "!SuperFakeKey"
 }
 
 #[test]
+fn invalid_function_key_in_multi_token_output_is_error() {
+    // An output like "、 !SuperFakeKey" splits into two tokens;
+    // the second token must be validated even though the whole string
+    // does not start with '!'.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q
+1 "、 !SuperFakeKey"
+"""
+"#;
+    assert!(load_layout(toml).is_err());
+}
+
+#[test]
+fn invalid_function_key_in_alias_is_error() {
+    // An alias value containing an invalid !-prefixed token must be rejected.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[alias]]
+bad_alias = "、 !SuperFakeKey"
+"#;
+    assert!(load_layout(toml).is_err());
+}
+
+#[test]
+fn empty_alias_sequence_is_error() {
+    // An alias mapped to an empty string must fail validation to prevent
+    // a panic at tokens[0] in the state machine.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[alias]]
+empty_alias = ""
+"#;
+    let err = load_layout(toml).unwrap_err();
+    assert!(
+        err.to_string().contains("empty_alias"),
+        "error should mention the alias name: {err}"
+    );
+}
+
+#[test]
 fn direct_trigger_tap_returns_passthrough() {
     // Hybrid layout with direct trigger; tapping the trigger with no other key
     // should emit a Passthrough action for the trigger key.
