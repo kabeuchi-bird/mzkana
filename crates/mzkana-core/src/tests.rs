@@ -610,3 +610,523 @@ ku_ret = "、 !Return"
         "no tail after rewrite: {tick_actions:?}"
     );
 }
+
+// ── tap_action = base_kana ────────────────────────────────────────────────────
+
+// f is row-2 index 3 (a s d f g …); g is index 4.
+// Header column labels are visual-only; physical keys come from row position.
+const DUAL_ROLE_LAYOUT: &str = r#"
+[meta]
+name   = "dual-role test"
+mode   = "kana"
+schema = 1
+
+[[modifier]]
+id             = "shift_f"
+key            = "f"
+kind           = "hold"
+hold_detection = "interrupt"
+tap_action     = "base_kana"
+
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. a    s    d    f    g
+2 ＿   ＿   ＿   か   き
+"""
+
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "shift_f"
+grid     = """
+. a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ぎ
+"""
+"#;
+
+#[test]
+fn dual_role_tap_emits_base_kana() {
+    // Tapping the modifier key alone should emit its base-layer kana.
+    let layout = load_layout(DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("f"), now);
+    let actions = m.process(InputEvent::up("f"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("か".to_string())),
+        "tap should emit base kana: {actions:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "か");
+}
+
+#[test]
+fn dual_role_hold_emits_shifted_kana() {
+    // Holding the modifier key then pressing another key should emit the shifted kana.
+    let layout = load_layout(DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("f"), now);      // modifier held
+    let actions = m.process(InputEvent::down("g"), now); // shifted layer → ぎ
+    assert!(
+        actions.contains(&OutputAction::SendKana("ぎ".to_string())),
+        "hold+key should emit shifted kana: {actions:?}"
+    );
+    // Modified-layer output goes into tentative buffer (so BackSpace can pop it).
+    assert_eq!(m.tentative_kana_string(), "ぎ");
+    // Releasing modifier after use must not emit base kana (was_interrupted=true)
+    let up = m.process(InputEvent::up("f"), now);
+    assert!(
+        !up.contains(&OutputAction::SendKana("か".to_string())),
+        "release after hold must not emit tap kana: {up:?}"
+    );
+}
+
+// ── send_key alias, tap_action = "output", ModifierKind::Toggle ───────────────
+
+#[test]
+fn send_key_is_alias_for_passthrough() {
+    // "send_key" should deserialize identically to "passthrough".
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[modifier]]
+id         = "m"
+key        = "space"
+tap_action = "send_key"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("space"), now);
+    let actions = m.process(InputEvent::up("space"), now);
+    assert!(
+        actions.contains(&OutputAction::Passthrough("space".to_string())),
+        "send_key tap should produce passthrough: {actions:?}"
+    );
+}
+
+#[test]
+fn tap_output_emits_specified_string() {
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[modifier]]
+id         = "m"
+key        = "space"
+tap_action = "output"
+tap_output = "　"
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "m"
+grid     = """
+. q
+1 あ
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("space"), now);
+    let actions = m.process(InputEvent::up("space"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("　".to_string())),
+        "tap_output should emit the specified string: {actions:?}"
+    );
+    // Tap output goes into the tentative buffer (same as any other kana).
+    assert_eq!(m.tentative_kana_string(), "　");
+}
+
+#[test]
+fn tap_output_with_alias_resolves() {
+    // tap_output can reference an alias name.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[alias]]
+ku_ret = "、 !Return"
+[[modifier]]
+id         = "m"
+key        = "space"
+tap_action = "output"
+tap_output = "ku_ret"
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "m"
+grid     = """
+. q
+1 あ
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("space"), now);
+    let actions = m.process(InputEvent::up("space"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("、".to_string())),
+        "alias should expand: {actions:?}"
+    );
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "alias tail should emit: {actions:?}"
+    );
+}
+
+#[test]
+fn tap_output_missing_is_error() {
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[modifier]]
+id         = "m"
+key        = "space"
+tap_action = "output"
+"#;
+    let err = load_layout(toml).unwrap_err();
+    assert!(
+        err.to_string().contains("tap_output"),
+        "error should mention tap_output: {err}"
+    );
+}
+
+#[test]
+fn base_kana_resolves_alias() {
+    // base_kana tap_action should expand alias names via resolve_sequence.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[alias]]
+ku_ret = "、 !Return"
+[[modifier]]
+id             = "m"
+key            = "f"
+tap_action     = "base_kana"
+hold_detection = "interrupt"
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. a    s    d    f
+2 ＿   ＿   ＿   ku_ret
+"""
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "m"
+grid     = """
+. a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ぎ
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("f"), now);
+    let actions = m.process(InputEvent::up("f"), now);
+    // base layer f → alias "ku_ret" → "、 !Return"
+    assert!(
+        actions.contains(&OutputAction::SendKana("、".to_string())),
+        "base_kana alias should expand to kana: {actions:?}"
+    );
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "base_kana alias should expand to function key: {actions:?}"
+    );
+}
+
+#[test]
+fn toggle_modifier_activates_layer() {
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[modifier]]
+id   = "caps"
+key  = "caps_lock"
+kind = "toggle"
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "caps"
+grid     = """
+. q
+1 あ
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // First press: toggle ON
+    m.process(InputEvent::down("caps_lock"), now);
+    m.process(InputEvent::up("caps_lock"), now);
+    // Now q should come from shifted layer
+    let actions = m.process(InputEvent::down("q"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("あ".to_string())),
+        "toggle ON: shifted layer active: {actions:?}"
+    );
+}
+
+#[test]
+fn toggle_modifier_deactivates_on_second_press() {
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[modifier]]
+id   = "caps"
+key  = "caps_lock"
+kind = "toggle"
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q
+1 い
+"""
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "caps"
+grid     = """
+. q
+1 あ
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // Toggle ON
+    m.process(InputEvent::down("caps_lock"), now);
+    m.process(InputEvent::up("caps_lock"), now);
+    // Toggle OFF
+    m.process(InputEvent::down("caps_lock"), now);
+    m.process(InputEvent::up("caps_lock"), now);
+    // Now q should come from base layer (not shifted)
+    let actions = m.process(InputEvent::down("q"), now);
+    assert!(
+        actions.contains(&OutputAction::SendKana("い".to_string())),
+        "toggle OFF: base layer active: {actions:?}"
+    );
+    assert!(
+        !actions.contains(&OutputAction::SendKana("あ".to_string())),
+        "shifted layer must not be active: {actions:?}"
+    );
+}
+
+// ── Additional boundary / regression tests ────────────────────────────────────
+
+// Timeout-based hold detection for dual-role modifier.
+// f is in row-2 index 3; g is index 4.
+const TIMEOUT_DUAL_ROLE_LAYOUT: &str = r#"
+[meta]
+name   = "timeout dual-role test"
+mode   = "kana"
+schema = 1
+
+[[modifier]]
+id              = "shift_f"
+key             = "f"
+kind            = "hold"
+hold_detection  = "timeout"
+hold_timeout_ms = 150
+tap_action      = "base_kana"
+
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. a    s    d    f    g
+2 ＿   ＿   ＿   か   き
+"""
+
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "shift_f"
+grid     = """
+. a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ぎ
+"""
+"#;
+
+#[test]
+fn dual_role_timeout_tap_emits_base_kana() {
+    // Quick press+release (< timeout) should emit base kana on tap.
+    let layout = load_layout(TIMEOUT_DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("f"), now);
+    let actions = m.process(InputEvent::up("f"), now); // released immediately (0ms)
+    assert!(
+        actions.contains(&OutputAction::SendKana("か".to_string())),
+        "quick tap should emit base kana: {actions:?}"
+    );
+}
+
+#[test]
+fn dual_role_timeout_hold_emits_shifted_kana() {
+    // Pressing another key after the timeout has elapsed should activate shifted layer.
+    let layout = load_layout(TIMEOUT_DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let press_time = Instant::now();
+    m.process(InputEvent::down("f"), press_time);
+    // Simulate pressing g after 200ms (> hold_timeout_ms = 150)
+    let later = press_time + std::time::Duration::from_millis(200);
+    let actions = m.process(InputEvent::down("g"), later);
+    assert!(
+        actions.contains(&OutputAction::SendKana("ぎ".to_string())),
+        "key pressed after timeout should use shifted layer: {actions:?}"
+    );
+}
+
+#[test]
+fn dual_role_key_in_chord_fires_chord_not_tap() {
+    // Pressing the dual-role modifier key and then another key together should
+    // emit the shifted-layer output (modifier wins) and NOT the base-kana tap.
+    // The modifier's `interrupted` flag prevents the tap from firing on key-up.
+    let layout = load_layout(DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("f"), now);      // modifier held
+    let a_g = m.process(InputEvent::down("g"), now); // interrupted → shifted layer ぎ
+    assert!(
+        a_g.contains(&OutputAction::SendKana("ぎ".to_string())),
+        "other key should emit from shifted layer: {a_g:?}"
+    );
+    let a_up = m.process(InputEvent::up("f"), now);
+    assert!(
+        !a_up.contains(&OutputAction::SendKana("か".to_string())),
+        "tap (base kana) must NOT fire after interrupted hold: {a_up:?}"
+    );
+}
+
+#[test]
+fn toggle_modifier_does_not_block_other_keys() {
+    // While a toggle modifier is on, regular keys not in the shifted layer
+    // should still fall through to the base layer.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[modifier]]
+id   = "caps"
+key  = "caps_lock"
+kind = "toggle"
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. q    w
+1 い   う
+"""
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "caps"
+grid     = """
+. q
+1 あ
+"""
+"#;
+    let layout = load_layout(toml).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // Toggle ON
+    m.process(InputEvent::down("caps_lock"), now);
+    m.process(InputEvent::up("caps_lock"), now);
+    // q is in shifted layer → あ
+    let a_q = m.process(InputEvent::down("q"), now);
+    assert!(a_q.contains(&OutputAction::SendKana("あ".to_string())), "{a_q:?}");
+    // w is NOT in shifted layer → falls through to base layer → う
+    let a_w = m.process(InputEvent::down("w"), now);
+    assert!(a_w.contains(&OutputAction::SendKana("う".to_string())), "{a_w:?}");
+}
+
+#[test]
+fn tentative_cleared_after_conversion_then_modifier_tap() {
+    // After Mozc conversion is notified, the tentative buffer is cleared.
+    // A subsequent modifier tap should add only its own kana (no stale entries).
+    let layout = load_layout(DUAL_ROLE_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // Build up some tentative kana
+    m.process(InputEvent::down("g"), now); // base き
+    assert_eq!(m.tentative_kana_string(), "き");
+    // Mozc switches to conversion (preedit committed)
+    m.notify_mozc_conversion();
+    assert_eq!(m.tentative_kana_string(), "");
+    // Tap modifier → base kana か added to (now-empty) tentative
+    m.process(InputEvent::down("f"), now);
+    m.process(InputEvent::up("f"), now);
+    assert_eq!(m.tentative_kana_string(), "か", "no stale entries after conversion");
+}
+
+#[test]
+fn tap_output_set_without_output_action_is_error() {
+    // Having tap_output but tap_action != "output" should be an error.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[modifier]]
+id         = "m"
+key        = "space"
+tap_action = "none"
+tap_output = "　"
+"#;
+    let err = load_layout(toml).unwrap_err();
+    assert!(
+        err.to_string().contains("tap_output"),
+        "error should mention tap_output: {err}"
+    );
+}
+
+#[test]
+fn direct_trigger_base_kana_tap_action_is_error() {
+    // base_kana has no effect on direct triggers and must be rejected.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "hybrid"
+schema = 1
+[direct_trigger]
+keys       = ["henkan"]
+tap_action = "base_kana"
+"#;
+    assert!(load_layout(toml).is_err());
+}
+
+#[test]
+fn direct_trigger_output_tap_action_is_error() {
+    // output has no effect on direct triggers and must be rejected.
+    let toml = r#"
+[meta]
+name = "test"
+mode = "hybrid"
+schema = 1
+[direct_trigger]
+keys       = ["henkan"]
+tap_action = "output"
+tap_output = "あ"
+"#;
+    assert!(load_layout(toml).is_err());
+}

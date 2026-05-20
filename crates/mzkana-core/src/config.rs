@@ -127,8 +127,12 @@ pub struct ModifierDef {
     pub hold_detection: HoldDetection,
     #[serde(default = "default_hold_timeout")]
     pub hold_timeout_ms: u32,
-    #[serde(default = "default_tap_send_key")]
+    #[serde(default = "default_tap_passthrough")]
     pub tap_action: TapAction,
+    /// Output string emitted on tap when `tap_action = "output"`.
+    /// Supports alias names, `!FunctionKey`, and space-separated multi-token sequences.
+    #[serde(default)]
+    pub tap_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -136,6 +140,8 @@ pub struct ModifierDef {
 pub enum ModifierKind {
     Hold,
     Oneshot,
+    /// Tap once to activate the layer; tap again to deactivate (sticky/Caps-Lock style).
+    Toggle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -148,8 +154,15 @@ pub enum HoldDetection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TapAction {
-    SendKey,
+    /// Pass the key through to the application unchanged (formerly also "send_key").
+    #[serde(alias = "send_key")]
     Passthrough,
+    /// Emit the base-layer kana for this key on tap (dual-role key).
+    BaseKana,
+    /// Emit the string in the `tap_output` field on tap.
+    /// Supports alias names, `!FunctionKey`, and multi-token sequences.
+    Output,
+    /// Do nothing on tap.
     None,
 }
 
@@ -162,8 +175,8 @@ fn default_interrupt() -> HoldDetection {
 fn default_hold_timeout() -> u32 {
     150
 }
-fn default_tap_send_key() -> TapAction {
-    TapAction::SendKey
+fn default_tap_passthrough() -> TapAction {
+    TapAction::Passthrough
 }
 
 // ── DirectTrigger ─────────────────────────────────────────────────────────────
@@ -190,9 +203,6 @@ pub enum TriggerKind {
 
 fn default_trigger_kind() -> TriggerKind {
     TriggerKind::Hold
-}
-fn default_tap_passthrough() -> TapAction {
-    TapAction::Passthrough
 }
 
 // ── Layer ─────────────────────────────────────────────────────────────────────
@@ -486,6 +496,37 @@ impl Layout {
         self.check_direct_conflicts()?;
         self.check_modifier_key_overlap()?;
         self.check_function_key_names()?;
+        self.check_tap_output()?;
+        Ok(())
+    }
+
+    fn check_tap_output(&self) -> Result<()> {
+        for m in &self.modifiers {
+            if m.tap_action == TapAction::Output && m.tap_output.is_none() {
+                return Err(ConfigError::MissingField(format!(
+                    "modifier '{}': tap_action = \"output\" requires a tap_output field",
+                    m.id
+                )));
+            }
+            if m.tap_output.is_some() && m.tap_action != TapAction::Output {
+                return Err(ConfigError::GridParse(format!(
+                    "modifier '{}': tap_output is set but tap_action is not \"output\"; \
+                     remove tap_output or set tap_action = \"output\"",
+                    m.id
+                )));
+            }
+        }
+        // BaseKana and Output have no effect on direct triggers (statemachine silently
+        // ignores them). Reject them early so authors get a clear error.
+        if let Some(ref dt) = self.direct_trigger {
+            if matches!(dt.tap_action, TapAction::BaseKana | TapAction::Output) {
+                return Err(ConfigError::GridParse(format!(
+                    "direct_trigger: tap_action = {:?} is not supported; \
+                     use \"passthrough\" or \"none\"",
+                    dt.tap_action
+                )));
+            }
+        }
         Ok(())
     }
 
