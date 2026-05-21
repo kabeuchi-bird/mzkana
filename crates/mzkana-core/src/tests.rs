@@ -80,9 +80,9 @@ fn grid_row_mapping() {
 
 #[test]
 fn extended_keys_in_numbered_rows() {
-    // Verify that bracketleft/bracketright/backslash (ROW1 indices 10-12),
-    // quote (ROW2 index 10), and intlro (ROW3 index 10) are reachable via
-    // numbered grid rows when the header declares enough columns.
+    // bracketleft/bracketright/backslash/tab  = ROW1 indices 10-13
+    // quote/caps_lock                         = ROW2 indices 10-11
+    // intlro/lshift                           = ROW3 indices 10-11
     let src = r#"
 [meta]
 name = "ext"
@@ -91,21 +91,21 @@ mode = "kanchoku"
 id   = "base"
 kind = "single"
 grid = """
-. c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12
-1  あ い う え お か き く け こ さ  し  す
-2  た ち つ て と な に ぬ ね の は  ＿  ＿
-3  ま み む め も や ゆ よ ら り る  ＿  ＿
+. c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13
+1  あ い う え お か き く け こ さ  し  す  せ
+2  た ち つ て と な に ぬ ね の は  ひ  ＿  ＿
+3  ま み む め も や ゆ よ ら り る  ろ  ＿  ＿
 """
 "#;
     let l = load_layout(src).unwrap();
-    // ROW1 index 10 → bracketleft, 11 → bracketright, 12 → backslash
-    assert_eq!(l.base_layer.get("bracketleft").map(|s| s.as_str()), Some("さ"));
+    assert_eq!(l.base_layer.get("bracketleft").map(|s| s.as_str()),  Some("さ"));
     assert_eq!(l.base_layer.get("bracketright").map(|s| s.as_str()), Some("し"));
-    assert_eq!(l.base_layer.get("backslash").map(|s| s.as_str()), Some("す"));
-    // ROW2 index 10 → quote
-    assert_eq!(l.base_layer.get("quote").map(|s| s.as_str()), Some("は"));
-    // ROW3 index 10 → intlro
-    assert_eq!(l.base_layer.get("intlro").map(|s| s.as_str()), Some("る"));
+    assert_eq!(l.base_layer.get("backslash").map(|s| s.as_str()),    Some("す"));
+    assert_eq!(l.base_layer.get("tab").map(|s| s.as_str()),          Some("せ"));
+    assert_eq!(l.base_layer.get("quote").map(|s| s.as_str()),        Some("は"));
+    assert_eq!(l.base_layer.get("caps_lock").map(|s| s.as_str()),    Some("ひ"));
+    assert_eq!(l.base_layer.get("intlro").map(|s| s.as_str()),       Some("る"));
+    assert_eq!(l.base_layer.get("lshift").map(|s| s.as_str()),       Some("ろ"));
 }
 
 // ── Single key → kana ─────────────────────────────────────────────────────────
