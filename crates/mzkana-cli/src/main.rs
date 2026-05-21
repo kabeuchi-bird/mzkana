@@ -3,10 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use mzkana_core::{
-    load_layout, InputEvent, MozcClient, MozcOutput, OutputAction, StateMachine,
-};
-use mzkana_core::mozc::client::xkb_name_to_mozc_special;
+use mzkana_core::{load_layout, InputEvent, Layout, MozcClient, MozcOutput, OutputAction, StateMachine};
 
 #[derive(Parser)]
 #[command(name = "mzkana", about = "MzKana layout tool")]
@@ -38,7 +35,7 @@ enum Command {
         /// Space-separated key sequence (same syntax as `run`)
         #[arg(short, long)]
         keys: String,
-        /// Path to the Mozc server socket (default: ~/.mozc/server.sock)
+        /// Path to the Mozc server socket (default: ~/.mozc/session.sock)
         #[arg(long)]
         socket: Option<PathBuf>,
     },
@@ -58,155 +55,123 @@ fn main() {
     match cli.command {
         Command::Validate { layout } => cmd_validate(&layout),
         Command::Run { layout, keys } => cmd_run(&layout, &keys),
-        Command::MozcRun { layout, keys, socket } => {
-            cmd_mozc_run(&layout, &keys, socket.as_deref())
-        }
+        Command::MozcRun { layout, keys, socket } => cmd_mozc_run(&layout, &keys, socket.as_deref()),
         Command::Schema => cmd_schema(),
     }
 }
 
-fn cmd_validate(path: &PathBuf) {
-    let src = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error reading {}: {e}", path.display());
-            std::process::exit(1);
-        }
-    };
-    match load_layout(&src) {
-        Ok(layout) => {
-            println!(
-                "OK: '{}' ({:?} mode, {} chord rules, {} direct rules)",
-                layout.meta.name,
-                layout.meta.mode,
-                layout.chords.len(),
-                layout.directs.len()
-            );
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    }
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+fn load_layout_or_exit(path: &Path) -> Layout {
+    let src = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error reading {}: {e}", path.display());
+        std::process::exit(1);
+    });
+    load_layout(&src).unwrap_or_else(|e| {
+        eprintln!("error loading layout: {e}");
+        std::process::exit(1);
+    })
 }
 
-fn cmd_run(path: &PathBuf, keys: &str) {
-    let src = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error reading {}: {e}", path.display());
-            std::process::exit(1);
+/// Parse and dispatch a single key token through the state machine.
+///
+/// Token syntax:
+///   `"d"`   → key-down for d
+///   `"d^"`  → key-up for d
+///   `"f+j"` → chord: both keys down in sequence
+fn process_token(sm: &mut StateMachine, token: &str, now: Instant) -> Result<Vec<OutputAction>, String> {
+    if let Some(k) = token.strip_suffix('^') {
+        if k.is_empty() {
+            return Err(format!("invalid token {token:?}: empty key before '^'"));
         }
-    };
-    let layout = match load_layout(&src) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error loading layout: {e}");
-            std::process::exit(1);
+        if k.contains('+') {
+            return Err(format!("invalid token {token:?}: '^' and '+' cannot be combined"));
         }
-    };
+        return Ok(sm.process(InputEvent::up(k), now));
+    }
+    if token.contains('+') {
+        if token.split('+').any(|s| s.is_empty()) {
+            return Err(format!("invalid token {token:?}: empty segment in chord"));
+        }
+        return Ok(token
+            .split('+')
+            .flat_map(|k| sm.process(InputEvent::down(k), now))
+            .collect());
+    }
+    if token.is_empty() {
+        return Err("invalid token: empty key name".into());
+    }
+    Ok(sm.process(InputEvent::down(token), now))
+}
 
-    let mut sm = StateMachine::new(layout);
+// ── Subcommands ───────────────────────────────────────────────────────────────
+
+fn cmd_validate(path: &Path) {
+    let layout = load_layout_or_exit(path);
+    println!(
+        "OK: '{}' ({:?} mode, {} chord rules, {} direct rules)",
+        layout.meta.name,
+        layout.meta.mode,
+        layout.chords.len(),
+        layout.directs.len()
+    );
+}
+
+fn cmd_run(path: &Path, keys: &str) {
+    let mut sm = StateMachine::new(load_layout_or_exit(path));
     let now = Instant::now();
 
-    // Parse key sequence tokens:
-    //   "d k"   → two separate key-downs
-    //   "f+j"   → chord: f down, j down (within chord window)
-    //   "d^"    → key up for d
     for token in keys.split_whitespace() {
-        let actions = if token.contains('+') {
-            // chord: press all keys in quick succession
-            let chord_keys: Vec<&str> = token.split('+').collect();
-            let mut all_actions = Vec::new();
-            for k in &chord_keys {
-                let ev = InputEvent::down(*k);
-                all_actions.extend(sm.process(ev, now));
-            }
-            all_actions
-        } else if let Some(k) = token.strip_suffix('^') {
-            sm.process(InputEvent::up(k), now)
-        } else {
-            sm.process(InputEvent::down(token), now)
-        };
-
+        let actions = process_token(&mut sm, token, now).unwrap_or_else(|e| {
+            eprintln!("token error: {e}");
+            std::process::exit(1);
+        });
         for action in &actions {
             print_action(action);
         }
     }
 
-    // Print tentative buffer state
     let tentative = sm.tentative_kana_string();
     if !tentative.is_empty() {
         println!("[preedit] {tentative}");
     }
 }
 
-fn print_action(action: &OutputAction) {
-    match action {
-        OutputAction::SendKana(s) => println!("send_kana({s})"),
-        OutputAction::Backspace => println!("backspace"),
-        OutputAction::CommitDirect(s) => println!("commit_direct({s})"),
-        OutputAction::SubmitAndCommit(s) => println!("submit_and_commit({s})"),
-        OutputAction::Passthrough(k) => println!("passthrough({k})"),
-        OutputAction::MozcSubmit => println!("mozc_submit"),
-        OutputAction::SendFunctionKey(k) => println!("send_function_key({k})"),
-    }
-}
+fn cmd_mozc_run(path: &Path, keys: &str, socket: Option<&Path>) {
+    let mut sm = StateMachine::new(load_layout_or_exit(path));
+    let mut mozc = MozcClient::connect(socket).unwrap_or_else(|e| {
+        eprintln!("failed to connect to Mozc: {e}");
+        eprintln!(
+            "(is mozc_server running? socket: {})",
+            socket
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| mzkana_core::mozc::default_socket_path().display().to_string())
+        );
+        std::process::exit(1);
+    });
+    println!("Connected to Mozc (session {})", mozc.session_id());
 
-fn cmd_mozc_run(path: &PathBuf, keys: &str, socket: Option<&Path>) {
-    let src = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error reading {}: {e}", path.display());
-            std::process::exit(1);
-        }
-    };
-    let layout = match load_layout(&src) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error loading layout: {e}");
-            std::process::exit(1);
-        }
-    };
-    let mut mozc = match MozcClient::connect(socket) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("failed to connect to Mozc: {e}");
-            eprintln!("(is mozc_server running? socket: {})",
-                socket.map(|p| p.display().to_string())
-                    .unwrap_or_else(|| mzkana_core::mozc::default_socket_path().display().to_string()));
-            std::process::exit(1);
-        }
-    };
-    println!("Connected to Mozc (session {})", mozc.session_id.unwrap_or(0));
-
-    let mut sm = StateMachine::new(layout);
     let now = Instant::now();
-
     for token in keys.split_whitespace() {
-        let actions = if token.contains('+') {
-            let chord_keys: Vec<&str> = token.split('+').collect();
-            let mut all_actions = Vec::new();
-            for k in &chord_keys {
-                all_actions.extend(sm.process(InputEvent::down(*k), now));
-            }
-            all_actions
-        } else if let Some(k) = token.strip_suffix('^') {
-            sm.process(InputEvent::up(k), now)
-        } else {
-            sm.process(InputEvent::down(token), now)
-        };
-
+        let actions = process_token(&mut sm, token, now).unwrap_or_else(|e| {
+            eprintln!("token error: {e}");
+            std::process::exit(1);
+        });
         for action in &actions {
             print_action(action);
-            let mozc_out = dispatch_to_mozc(&mut mozc, action);
-            if let Some(out) = mozc_out {
-                print_mozc_output(&out);
-                // Keep state machine in sync with Mozc mode
-                if out.is_converting {
-                    sm.notify_mozc_conversion();
-                } else {
-                    sm.notify_mozc_composition();
+            match dispatch_to_mozc(&mut mozc, action) {
+                Ok(Some(out)) => {
+                    print_mozc_output(&out);
+                    if out.is_converting {
+                        sm.notify_mozc_conversion();
+                    } else {
+                        sm.notify_mozc_composition();
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[mozc error] {e}");
+                    std::process::exit(1);
                 }
             }
         }
@@ -218,52 +183,21 @@ fn cmd_mozc_run(path: &PathBuf, keys: &str, socket: Option<&Path>) {
     }
 }
 
-/// Translate a single `OutputAction` into a Mozc call and return the response.
-fn dispatch_to_mozc(mozc: &mut MozcClient, action: &OutputAction) -> Option<MozcOutput> {
+// ── Mozc dispatch ─────────────────────────────────────────────────────────────
+
+fn dispatch_to_mozc(mozc: &mut MozcClient, action: &OutputAction) -> Result<Option<MozcOutput>, mzkana_core::MozcError> {
     match action {
-        OutputAction::SendKana(s) => {
-            match mozc.send_kana(s) {
-                Ok(out) => Some(out),
-                Err(e) => { eprintln!("[mozc error] {e}"); None }
-            }
-        }
-        OutputAction::Backspace => {
-            match mozc.send_backspace() {
-                Ok(out) => Some(out),
-                Err(e) => { eprintln!("[mozc error] {e}"); None }
-            }
-        }
-        OutputAction::MozcSubmit => {
-            match mozc.submit() {
-                Ok(out) => Some(out),
-                Err(e) => { eprintln!("[mozc error] {e}"); None }
-            }
-        }
-        // SubmitAndCommit: flush Mozc preedit then commit kanchoku result directly
+        OutputAction::SendKana(s)      => mozc.send_kana(s).map(Some),
+        OutputAction::Backspace        => mozc.send_backspace().map(Some),
+        OutputAction::MozcSubmit       => mozc.submit().map(Some),
         OutputAction::SubmitAndCommit(s) => {
-            match mozc.submit() {
-                Ok(out) => {
-                    println!("commit_direct({s})");
-                    Some(out)
-                }
-                Err(e) => {
-                    eprintln!("[mozc error] submit failed before kanchoku commit: {e}");
-                    None
-                }
-            }
+            let out = mozc.submit()?;
+            println!("commit_direct({s})");
+            Ok(Some(out))
         }
-        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) => None,
-        OutputAction::SendFunctionKey(name) => {
-            if xkb_name_to_mozc_special(name).is_none() {
-                // Keys with no Mozc mapping (e.g. Muhenkan) are passed through;
-                // Mozc would ignore them anyway.
-                return None;
-            }
-            match mozc.send_function_key(name) {
-                Ok(out) => Some(out),
-                Err(e) => { eprintln!("[mozc error] {e}"); None }
-            }
-        }
+        // SendFunctionKey: unmapped keys (Muhenkan etc.) return Err(Protocol) which propagates.
+        OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).map(Some),
+        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) => Ok(None),
     }
 }
 
@@ -276,6 +210,20 @@ fn print_mozc_output(out: &MozcOutput) {
     }
     if out.is_converting {
         println!("  → [CONVERSION mode]");
+    }
+}
+
+// ── Other commands ────────────────────────────────────────────────────────────
+
+fn print_action(action: &OutputAction) {
+    match action {
+        OutputAction::SendKana(s)        => println!("send_kana({s})"),
+        OutputAction::Backspace          => println!("backspace"),
+        OutputAction::CommitDirect(s)    => println!("commit_direct({s})"),
+        OutputAction::SubmitAndCommit(s) => println!("submit_and_commit({s})"),
+        OutputAction::Passthrough(k)     => println!("passthrough({k})"),
+        OutputAction::MozcSubmit         => println!("mozc_submit"),
+        OutputAction::SendFunctionKey(k) => println!("send_function_key({k})"),
     }
 }
 

@@ -195,17 +195,19 @@ pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::Decod
             out.result_value = String::from_utf8(val.to_vec()).ok();
         }
     }
-    // Output.preedit = 5
     if let Some(pre_fields) = find_msg(&out_fields, 5)? {
-        // Preedit.Segment is a proto2 group at field 2.
-        // Within the group: annotation=3, value=4
+        // Preedit.Segment is a proto2 group at field 2; annotation=3, value=4
         let segs = find_all_msg(&pre_fields, 2)?;
         let mut preedit = String::new();
         for seg in &segs {
             if let Some(v) = find_bytes(seg, 4) {
-                preedit.push_str(&String::from_utf8_lossy(v));
+                // Avoid Cow allocation on the common valid-UTF-8 path
+                match std::str::from_utf8(v) {
+                    Ok(s) => preedit.push_str(s),
+                    Err(_) => preedit.push_str(&String::from_utf8_lossy(v)),
+                }
             }
-            if find_varint(seg, 3) == Some(annotation::HIGHLIGHT) {
+            if !out.preedit_has_highlight && find_varint(seg, 3) == Some(annotation::HIGHLIGHT) {
                 out.preedit_has_highlight = true;
             }
         }
