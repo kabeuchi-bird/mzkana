@@ -266,13 +266,13 @@ pub static VALID_FUNCTION_KEYS: phf::Set<&'static str> = phf::phf_set! {
 
 /// QWERTY keyboard rows used for implicit row-to-key mapping.
 ///   row 0 → number row (1 2 3 4 5 6 7 8 9 0 minus equal yen)
-///   row 1 → top row    (q w e r t y u i o p bracketleft bracketright backslash tab)
-///   row 2 → home row   (a s d f g h j k l semicolon quote caps_lock)
-///   row 3 → bottom row (z x c v b n m comma period slash intlro lshift)
+///   row 1 → top row    (tab q w e r t y u i o p bracketleft bracketright backslash)
+///   row 2 → home row   (caps_lock a s d f g h j k l semicolon quote)
+///   row 3 → bottom row (lshift z x c v b n m comma period slash intlro)
 const QWERTY_ROW0: &[&str] = &["1","2","3","4","5","6","7","8","9","0","minus","equal","yen"];
-const QWERTY_ROW1: &[&str] = &["q","w","e","r","t","y","u","i","o","p","bracketleft","bracketright","backslash","tab"];
-const QWERTY_ROW2: &[&str] = &["a","s","d","f","g","h","j","k","l","semicolon","quote","caps_lock"];
-const QWERTY_ROW3: &[&str] = &["z","x","c","v","b","n","m","comma","period","slash","intlro","lshift"];
+const QWERTY_ROW1: &[&str] = &["tab","q","w","e","r","t","y","u","i","o","p","bracketleft","bracketright","backslash"];
+const QWERTY_ROW2: &[&str] = &["caps_lock","a","s","d","f","g","h","j","k","l","semicolon","quote"];
+const QWERTY_ROW3: &[&str] = &["lshift","z","x","c","v","b","n","m","comma","period","slash","intlro"];
 
 /// Parse a grid string into a map of key_id → kana.
 ///

@@ -80,9 +80,9 @@ fn grid_row_mapping() {
 
 #[test]
 fn extended_keys_in_numbered_rows() {
-    // bracketleft/bracketright/backslash/tab  = ROW1 indices 10-13
-    // quote/caps_lock                         = ROW2 indices 10-11
-    // intlro/lshift                           = ROW3 indices 10-11
+    // ROW1: tab(0) q(1) ... p(10) bracketleft(11) bracketright(12) backslash(13)
+    // ROW2: caps_lock(0) a(1) ... semicolon(10) quote(11)
+    // ROW3: lshift(0) z(1) ... slash(10) intlro(11)
     let src = r#"
 [meta]
 name = "ext"
@@ -98,14 +98,17 @@ grid = """
 """
 "#;
     let l = load_layout(src).unwrap();
-    assert_eq!(l.base_layer.get("bracketleft").map(|s| s.as_str()),  Some("さ"));
-    assert_eq!(l.base_layer.get("bracketright").map(|s| s.as_str()), Some("し"));
-    assert_eq!(l.base_layer.get("backslash").map(|s| s.as_str()),    Some("す"));
-    assert_eq!(l.base_layer.get("tab").map(|s| s.as_str()),          Some("せ"));
-    assert_eq!(l.base_layer.get("quote").map(|s| s.as_str()),        Some("は"));
-    assert_eq!(l.base_layer.get("caps_lock").map(|s| s.as_str()),    Some("ひ"));
-    assert_eq!(l.base_layer.get("intlro").map(|s| s.as_str()),       Some("る"));
-    assert_eq!(l.base_layer.get("lshift").map(|s| s.as_str()),       Some("ろ"));
+    assert_eq!(l.base_layer.get("tab").map(|s| s.as_str()),          Some("あ")); // ROW1[0]
+    assert_eq!(l.base_layer.get("q").map(|s| s.as_str()),            Some("い")); // ROW1[1]
+    assert_eq!(l.base_layer.get("bracketleft").map(|s| s.as_str()),  Some("し")); // ROW1[11]
+    assert_eq!(l.base_layer.get("bracketright").map(|s| s.as_str()), Some("す")); // ROW1[12]
+    assert_eq!(l.base_layer.get("backslash").map(|s| s.as_str()),    Some("せ")); // ROW1[13]
+    assert_eq!(l.base_layer.get("caps_lock").map(|s| s.as_str()),    Some("た")); // ROW2[0]
+    assert_eq!(l.base_layer.get("a").map(|s| s.as_str()),            Some("ち")); // ROW2[1]
+    assert_eq!(l.base_layer.get("quote").map(|s| s.as_str()),        Some("ひ")); // ROW2[11]
+    assert_eq!(l.base_layer.get("lshift").map(|s| s.as_str()),       Some("ま")); // ROW3[0]
+    assert_eq!(l.base_layer.get("z").map(|s| s.as_str()),            Some("み")); // ROW3[1]
+    assert_eq!(l.base_layer.get("intlro").map(|s| s.as_str()),       Some("ろ")); // ROW3[11]
 }
 
 // ── Single key → kana ─────────────────────────────────────────────────────────
@@ -332,8 +335,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 あ い
+. . q w
+1 ＿ あ い
 """
 [[chord]]
 keys   = ["q", "w"]
@@ -364,8 +367,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 あ !Tab
+. . q w
+1 ＿ あ !Tab
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -407,8 +410,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q
-1 "、 !SuperFakeKey"
+. . q
+1 ＿ "、 !SuperFakeKey"
 """
 "#;
     assert!(load_layout(toml).is_err());
@@ -490,8 +493,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 ku_ret い
+. . q w
+1 ＿ ku_ret い
 """
 [[alias]]
 ku_ret = "、 !Return"
@@ -522,8 +525,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q
-1 "。 !Return"
+. . q
+1 ＿ "。 !Return"
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -553,8 +556,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 ku_ret い
+. . q w
+1 ＿ ku_ret い
 """
 [[chord]]
 keys   = ["q", "w"]
@@ -600,8 +603,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 ku_ret い
+. . q w
+1 ＿ ku_ret い
 """
 [[chord]]
 keys   = ["q", "w"]
@@ -643,7 +646,7 @@ ku_ret = "、 !Return"
 
 // ── tap_action = base_kana ────────────────────────────────────────────────────
 
-// f is row-2 index 3 (a s d f g …); g is index 4.
+// f is row-2 index 4 (caps_lock a s d f g …); g is index 5.
 // Header column labels are visual-only; physical keys come from row position.
 const DUAL_ROLE_LAYOUT: &str = r#"
 [meta]
@@ -662,8 +665,8 @@ tap_action     = "base_kana"
 id   = "base"
 kind = "single"
 grid = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   か   き
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   か   き
 """
 
 [[layer]]
@@ -671,8 +674,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "shift_f"
 grid     = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   ＿   ぎ
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ＿   ぎ
 """
 "#;
 
@@ -756,8 +759,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "m"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -793,8 +796,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "m"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -850,16 +853,16 @@ hold_detection = "interrupt"
 id   = "base"
 kind = "single"
 grid = """
-. a    s    d    f
-2 ＿   ＿   ＿   ku_ret
+. .    a    s    d    f
+2 ＿   ＿   ＿   ＿   ku_ret
 """
 [[layer]]
 id       = "shifted"
 kind     = "modified"
 modifier = "m"
 grid     = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   ＿   ぎ
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ＿   ぎ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -894,8 +897,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "caps"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -927,16 +930,16 @@ kind = "toggle"
 id   = "base"
 kind = "single"
 grid = """
-. q
-1 い
+. . q
+1 ＿ い
 """
 [[layer]]
 id       = "shifted"
 kind     = "modified"
 modifier = "caps"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -982,8 +985,8 @@ tap_action      = "base_kana"
 id   = "base"
 kind = "single"
 grid = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   か   き
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   か   き
 """
 
 [[layer]]
@@ -991,8 +994,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "shift_f"
 grid     = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   ＿   ぎ
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ＿   ぎ
 """
 "#;
 
@@ -1064,16 +1067,16 @@ kind = "toggle"
 id   = "base"
 kind = "single"
 grid = """
-. q    w
-1 い   う
+. .    q    w
+1 ＿   い   う
 """
 [[layer]]
 id       = "shifted"
 kind     = "modified"
 modifier = "caps"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
