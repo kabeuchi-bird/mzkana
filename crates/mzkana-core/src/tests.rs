@@ -247,6 +247,95 @@ fn chord_symmetric_either_order() {
     assert!(a2.contains(&OutputAction::SendKana("が".to_string())));
 }
 
+// ── Mutual chord / simultaneous chord ────────────────────────────────────────
+
+const MUTUAL_CHORD_LAYOUT: &str = r#"
+[meta]
+name = "mutual-test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. .  q  w  e  r  t  y  u
+1 ＿ ＿ ＿ ＿ る ＿ ＿ す
+"""
+[[chord]]
+keys      = ["f", "j"]
+output    = "が"
+symmetric = true
+[[chord]]
+keys      = ["e", "j"]
+output    = "で"
+symmetric = true
+[[chord]]
+keys      = ["r", "u"]
+output    = "だ"
+symmetric = false
+"#;
+
+#[test]
+fn mutual_chord_fires_on_overlap() {
+    // symmetric=true: fires immediately when both keys are physically held.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // j down: no chord yet (f not held)
+    let a1 = m.process(InputEvent::down("j"), now);
+    // j has no base layer mapping, so no speculative output
+    assert!(a1.is_empty(), "j alone should produce no output: {a1:?}");
+    // f down: now j+f are both held → mutual chord fires immediately
+    let a2 = m.process(InputEvent::down("f"), now);
+    assert!(a2.contains(&OutputAction::SendKana("が".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "が");
+}
+
+#[test]
+fn mutual_chord_rollover() {
+    // After (f j)→「が」fires with j still held, pressing e fires (e j)→「で」.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("j"), now);
+    let a_fg = m.process(InputEvent::down("f"), now);
+    assert!(a_fg.contains(&OutputAction::SendKana("が".to_string())), "{a_fg:?}");
+    m.process(InputEvent::up("f"), now);
+    // j is still held; pressing e triggers (e j) mutual chord
+    let a_ej = m.process(InputEvent::down("e"), now);
+    assert!(a_ej.contains(&OutputAction::SendKana("で".to_string())), "rollover should fire (e,j): {a_ej:?}");
+    // 「が」must NOT have been backspaced
+    assert!(!a_ej.contains(&OutputAction::Backspace), "「が」must not be overwritten: {a_ej:?}");
+    assert_eq!(m.tentative_kana_string(), "がで");
+}
+
+#[test]
+fn mutual_chord_no_timeout_after_window() {
+    // symmetric=true chord fires regardless of timing — even well after chord_window_ms.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("j"), now);
+    // Press f long after any timeout would have expired (500 ms)
+    let late = now + std::time::Duration::from_millis(500);
+    let a = m.process(InputEvent::down("f"), late);
+    assert!(a.contains(&OutputAction::SendKana("が".to_string())), "mutual chord must fire regardless of timing: {a:?}");
+}
+
+#[test]
+fn timed_chord_reverse_order_allowed() {
+    // symmetric=false chord should fire in either key order.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // Definition order is ["r","u"]; try u first, then r
+    let a1 = m.process(InputEvent::down("u"), now);
+    assert!(a1.contains(&OutputAction::SendKana("す".to_string())), "u speculative: {a1:?}");
+    let a2 = m.process(InputEvent::down("r"), now);
+    assert!(a2.contains(&OutputAction::Backspace), "{a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("だ".to_string())), "reverse-order timed chord: {a2:?}");
+}
+
 // ── Kanchoku / T-code ─────────────────────────────────────────────────────────
 
 #[test]
