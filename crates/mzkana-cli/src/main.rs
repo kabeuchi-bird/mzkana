@@ -79,17 +79,29 @@ fn load_layout_or_exit(path: &Path) -> Layout {
 ///   `"d"`   → key-down for d
 ///   `"d^"`  → key-up for d
 ///   `"f+j"` → chord: both keys down in sequence
-fn process_token(sm: &mut StateMachine, token: &str, now: Instant) -> Vec<OutputAction> {
+fn process_token(sm: &mut StateMachine, token: &str, now: Instant) -> Result<Vec<OutputAction>, String> {
     if let Some(k) = token.strip_suffix('^') {
-        return sm.process(InputEvent::up(k), now);
+        if k.is_empty() {
+            return Err(format!("invalid token {token:?}: empty key before '^'"));
+        }
+        if k.contains('+') {
+            return Err(format!("invalid token {token:?}: '^' and '+' cannot be combined"));
+        }
+        return Ok(sm.process(InputEvent::up(k), now));
     }
     if token.contains('+') {
-        return token
+        if token.split('+').any(|s| s.is_empty()) {
+            return Err(format!("invalid token {token:?}: empty segment in chord"));
+        }
+        return Ok(token
             .split('+')
             .flat_map(|k| sm.process(InputEvent::down(k), now))
-            .collect();
+            .collect());
     }
-    sm.process(InputEvent::down(token), now)
+    if token.is_empty() {
+        return Err("invalid token: empty key name".into());
+    }
+    Ok(sm.process(InputEvent::down(token), now))
 }
 
 // ── Subcommands ───────────────────────────────────────────────────────────────
@@ -110,7 +122,11 @@ fn cmd_run(path: &Path, keys: &str) {
     let now = Instant::now();
 
     for token in keys.split_whitespace() {
-        for action in &process_token(&mut sm, token, now) {
+        let actions = process_token(&mut sm, token, now).unwrap_or_else(|e| {
+            eprintln!("token error: {e}");
+            std::process::exit(1);
+        });
+        for action in &actions {
             print_action(action);
         }
     }
@@ -137,14 +153,25 @@ fn cmd_mozc_run(path: &Path, keys: &str, socket: Option<&Path>) {
 
     let now = Instant::now();
     for token in keys.split_whitespace() {
-        for action in &process_token(&mut sm, token, now) {
+        let actions = process_token(&mut sm, token, now).unwrap_or_else(|e| {
+            eprintln!("token error: {e}");
+            std::process::exit(1);
+        });
+        for action in &actions {
             print_action(action);
-            if let Some(out) = dispatch_to_mozc(&mut mozc, action) {
-                print_mozc_output(&out);
-                if out.is_converting {
-                    sm.notify_mozc_conversion();
-                } else {
-                    sm.notify_mozc_composition();
+            match dispatch_to_mozc(&mut mozc, action) {
+                Ok(Some(out)) => {
+                    print_mozc_output(&out);
+                    if out.is_converting {
+                        sm.notify_mozc_conversion();
+                    } else {
+                        sm.notify_mozc_composition();
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[mozc error] {e}");
+                    std::process::exit(1);
                 }
             }
         }
@@ -158,25 +185,19 @@ fn cmd_mozc_run(path: &Path, keys: &str, socket: Option<&Path>) {
 
 // ── Mozc dispatch ─────────────────────────────────────────────────────────────
 
-fn mozc_or_log(result: Result<MozcOutput, mzkana_core::MozcError>) -> Option<MozcOutput> {
-    match result {
-        Ok(out) => Some(out),
-        Err(e) => { eprintln!("[mozc error] {e}"); None }
-    }
-}
-
-fn dispatch_to_mozc(mozc: &mut MozcClient, action: &OutputAction) -> Option<MozcOutput> {
+fn dispatch_to_mozc(mozc: &mut MozcClient, action: &OutputAction) -> Result<Option<MozcOutput>, mzkana_core::MozcError> {
     match action {
-        OutputAction::SendKana(s)      => mozc_or_log(mozc.send_kana(s)),
-        OutputAction::Backspace        => mozc_or_log(mozc.send_backspace()),
-        OutputAction::MozcSubmit       => mozc_or_log(mozc.submit()),
-        OutputAction::SubmitAndCommit(s) => match mozc.submit() {
-            Ok(out) => { println!("commit_direct({s})"); Some(out) }
-            Err(e)  => { eprintln!("[mozc error] submit failed before kanchoku commit: {e}"); None }
-        },
-        // SendFunctionKey: unmapped keys (Muhenkan etc.) log a protocol message and are skipped.
-        OutputAction::SendFunctionKey(name) => mozc_or_log(mozc.send_function_key(name)),
-        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) => None,
+        OutputAction::SendKana(s)      => mozc.send_kana(s).map(Some),
+        OutputAction::Backspace        => mozc.send_backspace().map(Some),
+        OutputAction::MozcSubmit       => mozc.submit().map(Some),
+        OutputAction::SubmitAndCommit(s) => {
+            let out = mozc.submit()?;
+            println!("commit_direct({s})");
+            Ok(Some(out))
+        }
+        // SendFunctionKey: unmapped keys (Muhenkan etc.) return Err(Protocol) which propagates.
+        OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).map(Some),
+        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) => Ok(None),
     }
 }
 
