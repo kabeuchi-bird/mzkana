@@ -145,14 +145,14 @@ pub fn decode(data: &[u8]) -> Result<Vec<Field>, DecodeError> {
 /// Find the first field with the given number and return its varint value.
 pub fn find_varint(fields: &[Field], field_num: u32) -> Option<u64> {
     fields.iter().find_map(|(n, v)| {
-        (*n == field_num).then(|| if let Value::Varint(x) = v { Some(*x) } else { None }).flatten()
+        (*n == field_num).then_some(if let Value::Varint(x) = v { Some(*x) } else { None }).flatten()
     })
 }
 
 /// Find the first field with the given number and return its bytes/string value.
-pub fn find_bytes<'a>(fields: &'a [Field], field_num: u32) -> Option<&'a [u8]> {
+pub fn find_bytes(fields: &[Field], field_num: u32) -> Option<&[u8]> {
     fields.iter().find_map(|(n, v)| {
-        (*n == field_num).then(|| if let Value::Bytes(b) = v { Some(b.as_slice()) } else { None }).flatten()
+        (*n == field_num).then_some(if let Value::Bytes(b) = v { Some(b.as_slice()) } else { None }).flatten()
     })
 }
 

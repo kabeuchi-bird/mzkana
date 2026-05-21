@@ -371,7 +371,7 @@ pub(crate) fn tokenize_grid_row(s: &str) -> Vec<String> {
 
     loop {
         // Skip whitespace between tokens
-        while chars.peek().map_or(false, |c| c.is_ascii_whitespace()) {
+        while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
             chars.next();
         }
         match chars.peek() {
@@ -387,7 +387,7 @@ pub(crate) fn tokenize_grid_row(s: &str) -> Vec<String> {
             }
             _ => {
                 let mut tok = String::new();
-                while chars.peek().map_or(false, |c| !c.is_ascii_whitespace()) {
+                while chars.peek().is_some_and(|c| !c.is_ascii_whitespace()) {
                     tok.push(chars.next().unwrap());
                 }
                 tokens.push(tok);

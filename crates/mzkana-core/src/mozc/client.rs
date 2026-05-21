@@ -180,7 +180,7 @@ pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
         "Hiragana_Katakana" => Some(special_key::KANA),
         // F1–F12: SpecialKey values 19–30
         s if s.starts_with('F') => s[1..].parse::<u64>().ok()
-            .filter(|&n| n >= 1 && n <= 12)
+            .filter(|&n| (1..=12).contains(&n))
             .map(|n| 18 + n),
         _ => None,
     }

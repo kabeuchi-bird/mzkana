@@ -178,7 +178,7 @@ impl StateMachine {
             if now >= deadline {
                 // Confirm all expired tentative chars and emit any deferred tail tokens.
                 for tc in &mut self.tentative_buffer {
-                    if tc.rewrite_deadline.map_or(false, |d| now >= d) {
+                    if tc.rewrite_deadline.is_some_and(|d| now >= d) {
                         tc.rewrite_deadline = None;
                         for token in tc.pending_tail.drain(..) {
                             actions.push(Self::make_output_action(&token));
@@ -267,8 +267,7 @@ impl StateMachine {
             if mod_output == crate::config::PASSTHROUGH_CELL {
                 return vec![OutputAction::Passthrough(key.to_string())];
             }
-            let mut actions = Vec::new();
-            actions.push(OutputAction::SendKana(mod_output.clone()));
+            let actions = vec![OutputAction::SendKana(mod_output.clone())];
             self.tentative_buffer.push(TentativeChar {
                 kana: mod_output,
                 source_keys: vec![key.to_string()],
@@ -389,7 +388,7 @@ impl StateMachine {
             .collect();
 
         // A leading function-key token: emit entire sequence immediately (non-speculative)
-        if tokens.first().map_or(false, |t| t.starts_with('!')) {
+        if tokens.first().is_some_and(|t| t.starts_with('!')) {
             self.pending_keys.clear();
             let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
             return self.emit_sequence(&refs, vec![key.to_string()], None, now);
@@ -407,7 +406,7 @@ impl StateMachine {
 
         // Speculative emit of first kana; tail (if any) deferred until confirmed
         let kana = tokens[0].clone();
-        let pending_tail: Vec<String> = tokens[1..].iter().cloned().collect();
+        let pending_tail: Vec<String> = tokens[1..].to_vec();
         actions.push(OutputAction::SendKana(kana.clone()));
 
         let rewrite_deadline = if has_chord_candidate {
@@ -510,10 +509,9 @@ impl StateMachine {
             let chord_set: BTreeSet<&str> = chord.keys.iter().map(String::as_str).collect();
             if chord_set == key_set {
                 // For non-symmetric chords, verify order matches
-                if !chord.symmetric && keys.len() == chord.keys.len() {
-                    if keys.iter().zip(chord.keys.iter()).any(|(a, b)| a != b) {
-                        continue;
-                    }
+                if !chord.symmetric && keys.len() == chord.keys.len()
+                    && keys.iter().zip(chord.keys.iter()).any(|(a, b)| a != b) {
+                    continue;
                 }
                 return Some(RuleMatch {
                     output: chord.output.clone(),
@@ -614,7 +612,7 @@ impl StateMachine {
         self.layout
             .direct_trigger
             .as_ref()
-            .map_or(false, |dt| dt.keys.iter().any(|k| k == key))
+            .is_some_and(|dt| dt.keys.iter().any(|k| k == key))
     }
 
     fn handle_direct_trigger_down(&mut self, _key: &str, _now: Instant) -> Vec<OutputAction> {
@@ -856,7 +854,7 @@ impl StateMachine {
     fn flush_tentative(&mut self) -> Vec<OutputAction> {
         let count = self.tentative_buffer.len();
         self.tentative_buffer.clear();
-        std::iter::repeat(OutputAction::Backspace).take(count).collect()
+        std::iter::repeat_n(OutputAction::Backspace, count).collect()
     }
 
     // ── Mozc output feedback ──────────────────────────────────────────────────
