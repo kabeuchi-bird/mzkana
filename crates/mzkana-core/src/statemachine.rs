@@ -391,11 +391,20 @@ impl StateMachine {
         }
 
         let Some(output) = base_kana else {
-            // No base assignment for this key (e.g. pure trigger key) — don't send tentative
+            // No base assignment for this key. Keep in pending_keys only if it may
+            // participate in a timed chord (timed chord detection reads pending_keys).
+            // Mutual chords fire via held_keys before pending_keys.push, so they don't
+            // need the key here.
+            if !has_timed_chord {
+                self.pending_keys.pop();
+            }
             return actions;
         };
 
         if output == crate::config::PASSTHROUGH_CELL {
+            // Passthrough keys are sent directly to the application and don't participate
+            // in chord matching, so remove the pending entry to prevent spurious matches.
+            self.pending_keys.pop();
             return vec![OutputAction::Passthrough(key.to_string())];
         }
 
@@ -436,7 +445,17 @@ impl StateMachine {
                 None => deadline,
             });
             Some(deadline)
-        } else if has_mutual_chord || has_prefix_continuation || has_postfix_candidate {
+        } else if has_mutual_chord {
+            // Use mutual_window_ms as the confirmation deadline so that tick() can flush
+            // any deferred tail tokens (e.g. multi-token output) if no chord fires.
+            let window = self.layout.settings.mutual_window_ms;
+            let deadline = now + Duration::from_millis(window as u64);
+            self.chord_deadline = Some(match self.chord_deadline {
+                Some(existing) => existing.min(deadline),
+                None => deadline,
+            });
+            Some(deadline)
+        } else if has_prefix_continuation || has_postfix_candidate {
             None // sequence rule: permanently rewritable until resolved
         } else {
             // Confirmed immediately — no continuations; emit any tail right away
