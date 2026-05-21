@@ -11,8 +11,7 @@ use super::proto::{
 };
 use super::MozcOutput;
 
-/// Maximum accepted response frame size (1 MiB). Responses larger than this
-/// are rejected to prevent allocation of attacker-controlled memory.
+/// Maximum accepted response frame size (1 MiB).
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
 /// Default path to the Mozc server socket.
@@ -41,29 +40,23 @@ impl std::fmt::Display for MozcError {
 }
 
 impl std::error::Error for MozcError {}
-
-impl From<io::Error> for MozcError {
-    fn from(e: io::Error) -> Self { Self::Io(e) }
-}
-impl From<DecodeError> for MozcError {
-    fn from(e: DecodeError) -> Self { Self::Decode(e) }
-}
+impl From<io::Error> for MozcError { fn from(e: io::Error) -> Self { Self::Io(e) } }
+impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::Decode(e) } }
 
 /// Blocking Mozc IPC client over a Unix domain socket.
 ///
 /// Wire framing: `uint32_le(length) | proto_bytes` in both directions.
 pub struct MozcClient {
     stream: UnixStream,
-    pub session_id: Option<u64>,
+    session_id: Option<u64>,
 }
 
 impl MozcClient {
     /// Connect to the Mozc server socket and create a session.
     pub fn connect(socket_path: Option<&Path>) -> Result<Self, MozcError> {
-        let path = match socket_path {
-            Some(p) => p.to_path_buf(),
-            None => default_socket_path(),
-        };
+        let path = socket_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(default_socket_path);
         let stream = UnixStream::connect(&path)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -72,14 +65,20 @@ impl MozcClient {
         Ok(client)
     }
 
+    /// The active session id. Returns 0 only during the drop sequence.
+    pub fn session_id(&self) -> u64 {
+        self.session_id.unwrap_or(0)
+    }
+
     fn send_recv(&mut self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let cmd_bytes = encode_command(input);
-        // Write: 4-byte LE length + proto bytes
-        let len = cmd_bytes.len() as u32;
-        self.stream.write_all(&len.to_le_bytes())?;
-        self.stream.write_all(&cmd_bytes)?;
-        self.stream.flush()?;
-        // Read response: 4-byte LE length + proto bytes
+        // Prepend length into a single buffer to issue one write syscall instead of two.
+        // UnixStream has no userspace write buffer, so no flush is needed.
+        let mut frame = Vec::with_capacity(4 + cmd_bytes.len());
+        frame.extend_from_slice(&(cmd_bytes.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&cmd_bytes);
+        self.stream.write_all(&frame)?;
+
         let mut len_buf = [0u8; 4];
         self.stream.read_exact(&mut len_buf)?;
         let resp_len = u32::from_le_bytes(len_buf) as usize;
@@ -90,16 +89,15 @@ impl MozcClient {
         }
         let mut resp_buf = vec![0u8; resp_len];
         self.stream.read_exact(&mut resp_buf)?;
-        let out = decode_response(&resp_buf)?;
-        Ok(out)
+        Ok(decode_response(&resp_buf)?)
     }
 
     fn create_session(&mut self) -> Result<(), MozcError> {
         let out = self.send_recv(&input_create_session())?;
-        let id = out
-            .session_id
-            .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?;
-        self.session_id = Some(id);
+        self.session_id = Some(
+            out.session_id
+                .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?,
+        );
         Ok(())
     }
 
@@ -107,80 +105,79 @@ impl MozcClient {
         self.session_id.ok_or(MozcError::NotConnected)
     }
 
+    /// Encode `input`, send it, receive the response, and wrap as `MozcOutput`.
+    fn dispatch(&mut self, input: &super::proto::EncodedInput) -> Result<MozcOutput, MozcError> {
+        Ok(MozcOutput::from_decoded(self.send_recv(input)?))
+    }
+
+    /// Send a special key code (shared by backspace, space, enter, and function keys).
+    fn send_special_key(&mut self, code: u64) -> Result<MozcOutput, MozcError> {
+        let sid = self.sid()?;
+        self.dispatch(&input_send_special(sid, code))
+    }
+
     /// Send a kana string to Mozc preedit (DIRECT_INPUT style).
     pub fn send_kana(&mut self, kana: &str) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
-        let out = self.send_recv(&input_send_kana(sid, kana))?;
-        Ok(MozcOutput::from_decoded(out))
+        self.dispatch(&input_send_kana(sid, kana))
     }
 
     /// Send a BackSpace key.
     pub fn send_backspace(&mut self) -> Result<MozcOutput, MozcError> {
-        let sid = self.sid()?;
-        let out = self.send_recv(&input_send_special(sid, special_key::BACKSPACE))?;
-        Ok(MozcOutput::from_decoded(out))
+        self.send_special_key(special_key::BACKSPACE)
     }
 
     /// Submit (commit) the current preedit.
     pub fn submit(&mut self) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
-        let out = self.send_recv(&input_submit(sid))?;
-        Ok(MozcOutput::from_decoded(out))
+        self.dispatch(&input_submit(sid))
     }
 
     /// Revert (cancel) the current preedit.
     pub fn revert(&mut self) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
-        let out = self.send_recv(&input_revert(sid))?;
-        Ok(MozcOutput::from_decoded(out))
+        self.dispatch(&input_revert(sid))
     }
 
     /// Send a Space key (typically starts conversion).
     pub fn send_space(&mut self) -> Result<MozcOutput, MozcError> {
-        let sid = self.sid()?;
-        let out = self.send_recv(&input_send_special(sid, special_key::SPACE))?;
-        Ok(MozcOutput::from_decoded(out))
+        self.send_special_key(special_key::SPACE)
     }
 
     /// Send an Enter key.
     pub fn send_enter(&mut self) -> Result<MozcOutput, MozcError> {
-        let sid = self.sid()?;
-        let out = self.send_recv(&input_send_special(sid, special_key::ENTER))?;
-        Ok(MozcOutput::from_decoded(out))
+        self.send_special_key(special_key::ENTER)
     }
 
     /// Send a function key by its XKB keysym name (e.g. `"Return"`, `"Up"`, `"F1"`).
     /// Returns `Err(Protocol)` for names that have no Mozc SpecialKey mapping.
     pub fn send_function_key(&mut self, name: &str) -> Result<MozcOutput, MozcError> {
-        let code = xkb_name_to_mozc_special(name).ok_or_else(|| {
-            MozcError::Protocol(format!("no Mozc SpecialKey for function key: {name}"))
-        })?;
-        let sid = self.sid()?;
-        let out = self.send_recv(&input_send_special(sid, code))?;
-        Ok(MozcOutput::from_decoded(out))
+        let code = xkb_name_to_mozc_special(name)
+            .ok_or_else(|| MozcError::Protocol(format!("no Mozc SpecialKey for: {name}")))?;
+        self.send_special_key(code)
     }
 }
 
 /// Map an XKB keysym name (as used after `!` in layout files) to a Mozc SpecialKey value.
 pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
     match name {
-        "Return"              => Some(special_key::ENTER),
-        "Tab"                 => Some(special_key::TAB),
-        "Escape"              => Some(special_key::ESCAPE),
-        "BackSpace"           => Some(special_key::BACKSPACE),
-        "Delete"              => Some(special_key::DEL),
-        "Insert"              => Some(special_key::INSERT),
-        "Home"                => Some(special_key::HOME),
-        "End"                 => Some(special_key::END),
-        "Up"                  => Some(special_key::UP),
-        "Down"                => Some(special_key::DOWN),
-        "Left"                => Some(special_key::LEFT),
-        "Right"               => Some(special_key::RIGHT),
-        "Prior" | "PageUp"    => Some(special_key::PAGE_UP),
-        "Next"  | "PageDown"  => Some(special_key::PAGE_DOWN),
-        "space"               => Some(special_key::SPACE),
-        "Henkan"              => Some(special_key::HENKAN),
-        "Hiragana_Katakana"   => Some(special_key::KANA),
+        "Return"            => Some(special_key::ENTER),
+        "Tab"               => Some(special_key::TAB),
+        "Escape"            => Some(special_key::ESCAPE),
+        "BackSpace"         => Some(special_key::BACKSPACE),
+        "Delete"            => Some(special_key::DEL),
+        "Insert"            => Some(special_key::INSERT),
+        "Home"              => Some(special_key::HOME),
+        "End"               => Some(special_key::END),
+        "Up"                => Some(special_key::UP),
+        "Down"              => Some(special_key::DOWN),
+        "Left"              => Some(special_key::LEFT),
+        "Right"             => Some(special_key::RIGHT),
+        "Prior" | "PageUp"  => Some(special_key::PAGE_UP),
+        "Next"  | "PageDown" => Some(special_key::PAGE_DOWN),
+        "space"             => Some(special_key::SPACE),
+        "Henkan"            => Some(special_key::HENKAN),
+        "Hiragana_Katakana" => Some(special_key::KANA),
         // F1–F12: SpecialKey values 19–30
         s if s.starts_with('F') => s[1..].parse::<u64>().ok()
             .filter(|&n| n >= 1 && n <= 12)

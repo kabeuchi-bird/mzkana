@@ -1,12 +1,10 @@
 /// Minimal protobuf wire-format encoder/decoder.
 ///
-/// Only wire types actually present in Mozc's commands.proto are handled:
+/// Handles the wire types present in Mozc's commands.proto:
 /// - 0 (Varint): integers, bools, enums
 /// - 2 (LEN): strings, bytes, embedded messages
 /// - 3/4 (Start/End group): Preedit.Segment in proto2 group syntax
 use std::fmt;
-
-// ── Wire types ────────────────────────────────────────────────────────────────
 
 const WT_VARINT: u64 = 0;
 const WT_LEN: u64 = 2;
@@ -92,8 +90,6 @@ fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64, DecodeError> {
     }
 }
 
-/// Decode all fields from `data[pos..]`, stopping at end-of-slice or at an
-/// end-group tag matching `end_group_field` (used for nested group parsing).
 fn decode_into(
     data: &[u8],
     pos: &mut usize,
@@ -127,13 +123,9 @@ fn decode_into(
                 if end_group_field == Some(field_num) {
                     return Ok(fields);
                 }
-                return Err(err(format!(
-                    "unexpected end-group for field {field_num}"
-                )));
+                return Err(err(format!("unexpected end-group for field {field_num}")));
             }
-            wt => {
-                return Err(err(format!("unsupported wire type {wt}")));
-            }
+            wt => return Err(err(format!("unsupported wire type {wt}"))),
         }
     }
     if end_group_field.is_some() {
@@ -153,37 +145,34 @@ pub fn decode(data: &[u8]) -> Result<Vec<Field>, DecodeError> {
 /// Find the first field with the given number and return its varint value.
 pub fn find_varint(fields: &[Field], field_num: u32) -> Option<u64> {
     fields.iter().find_map(|(n, v)| {
-        if *n == field_num {
-            if let Value::Varint(x) = v { Some(*x) } else { None }
-        } else {
-            None
-        }
+        (*n == field_num).then(|| if let Value::Varint(x) = v { Some(*x) } else { None }).flatten()
     })
 }
 
 /// Find the first field with the given number and return its bytes/string value.
 pub fn find_bytes<'a>(fields: &'a [Field], field_num: u32) -> Option<&'a [u8]> {
     fields.iter().find_map(|(n, v)| {
-        if *n == field_num {
-            if let Value::Bytes(b) = v { Some(b.as_slice()) } else { None }
-        } else {
-            None
-        }
+        (*n == field_num).then(|| if let Value::Bytes(b) = v { Some(b.as_slice()) } else { None }).flatten()
     })
+}
+
+/// Decode a `Value` that is expected to be an embedded message or group.
+/// Returns `Ok(None)` for other value types (silently skipped).
+fn decode_msg_value(v: &Value) -> Result<Option<Vec<Field>>, DecodeError> {
+    match v {
+        Value::Bytes(b) => decode(b).map(Some),
+        Value::Group(g) => Ok(Some(g.clone())),
+        _ => Ok(None),
+    }
 }
 
 /// Find the first field with the given number and return nested group/message fields.
 /// Returns `Err` if the field is present but its bytes cannot be decoded.
 pub fn find_msg(fields: &[Field], field_num: u32) -> Result<Option<Vec<Field>>, DecodeError> {
     for (n, v) in fields {
-        if *n != field_num {
-            continue;
+        if *n == field_num {
+            return decode_msg_value(v);
         }
-        return match v {
-            Value::Bytes(b) => decode(b).map(Some),
-            Value::Group(g) => Ok(Some(g.clone())),
-            _ => Ok(None),
-        };
     }
     Ok(None)
 }
@@ -193,15 +182,11 @@ pub fn find_msg(fields: &[Field], field_num: u32) -> Result<Option<Vec<Field>>, 
 pub fn find_all_msg(fields: &[Field], field_num: u32) -> Result<Vec<Vec<Field>>, DecodeError> {
     let mut out = Vec::new();
     for (n, v) in fields {
-        if *n != field_num {
-            continue;
+        if *n == field_num {
+            if let Some(msg) = decode_msg_value(v)? {
+                out.push(msg);
+            }
         }
-        let decoded = match v {
-            Value::Bytes(b) => decode(b)?,
-            Value::Group(g) => g.clone(),
-            _ => continue,
-        };
-        out.push(decoded);
     }
     Ok(out)
 }
