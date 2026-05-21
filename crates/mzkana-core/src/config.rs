@@ -264,6 +264,10 @@ pub static VALID_FUNCTION_KEYS: phf::Set<&'static str> = phf::phf_set! {
 
 // ── Grid parsing ──────────────────────────────────────────────────────────────
 
+/// Sentinel stored in layer maps for grid cells marked `XX` (key passthrough).
+/// Must not appear in normal kana/alias output.
+pub const PASSTHROUGH_CELL: &str = "\x00pt";
+
 /// QWERTY keyboard rows used for implicit row-to-key mapping.
 ///   row 0 → number row (1 2 3 4 5 6 7 8 9 0 minus equal yen)
 ///   row 1 → top row    (tab q w e r t y u i o p bracketleft bracketright backslash)
@@ -349,7 +353,8 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
             if *value == "＿" || *value == "." || value.is_empty() {
                 continue;
             }
-            map.insert(key_row[i].to_string(), value.to_string());
+            let stored = if *value == "XX" { PASSTHROUGH_CELL } else { value.as_str() };
+            map.insert(key_row[i].to_string(), stored.to_string());
         }
     }
 

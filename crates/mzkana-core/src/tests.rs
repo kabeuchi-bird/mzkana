@@ -111,6 +111,73 @@ grid = """
     assert_eq!(l.base_layer.get("intlro").map(|s| s.as_str()),       Some("ろ")); // ROW3[11]
 }
 
+// ── XX passthrough cell ───────────────────────────────────────────────────────
+
+#[test]
+fn xx_cell_base_layer_emits_passthrough() {
+    let src = r#"
+[meta]
+name = "xx-test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. . q w
+1 ＿ あ XX
+"""
+"#;
+    let l = load_layout(src).unwrap();
+    let mut m = StateMachine::new(l);
+    let now = Instant::now();
+    // q → SendKana("あ") as normal
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(a.contains(&OutputAction::SendKana("あ".to_string())), "{a:?}");
+    // w → Passthrough("w") because cell is XX
+    let b = m.process(InputEvent::down("w"), now);
+    assert!(b.contains(&OutputAction::Passthrough("w".to_string())), "{b:?}");
+    assert!(!b.iter().any(|x| matches!(x, OutputAction::SendKana(_))), "{b:?}");
+}
+
+#[test]
+fn xx_cell_modified_layer_emits_passthrough() {
+    let src = r#"
+[meta]
+name = "xx-mod"
+mode = "kana"
+schema = 1
+[[modifier]]
+id   = "m"
+key  = "space"
+kind = "hold"
+hold_detection = "interrupt"
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "m"
+grid     = """
+. . q
+1 ＿ XX
+"""
+"#;
+    let l = load_layout(src).unwrap();
+    let mut m = StateMachine::new(l);
+    let now = Instant::now();
+    // Hold space then press q → modified layer XX → Passthrough("q")
+    m.process(InputEvent::down("space"), now);
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(a.contains(&OutputAction::Passthrough("q".to_string())), "{a:?}");
+    assert!(!a.iter().any(|x| matches!(x, OutputAction::SendKana(_))), "{a:?}");
+}
+
 // ── Single key → kana ─────────────────────────────────────────────────────────
 
 #[test]

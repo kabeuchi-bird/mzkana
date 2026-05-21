@@ -264,6 +264,9 @@ impl StateMachine {
             for ms in &mut self.modifier_states {
                 ms.oneshot_pending = false;
             }
+            if mod_output == crate::config::PASSTHROUGH_CELL {
+                return vec![OutputAction::Passthrough(key.to_string())];
+            }
             let mut actions = Vec::new();
             actions.push(OutputAction::SendKana(mod_output.clone()));
             self.tentative_buffer.push(TentativeChar {
@@ -373,6 +376,10 @@ impl StateMachine {
             // No base assignment for this key (e.g. pure trigger key) — don't send tentative
             return actions;
         };
+
+        if output == crate::config::PASSTHROUGH_CELL {
+            return vec![OutputAction::Passthrough(key.to_string())];
+        }
 
         // Resolve to token sequence (alias / quoted sequence / single token)
         let tokens: Vec<String> = self
