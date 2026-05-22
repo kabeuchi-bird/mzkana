@@ -2,5 +2,6 @@
 members = [
     "crates/mzkana-core",
     "crates/mzkana-cli",
+    "crates/mzkana-ffi",
 ]
 resolver = "2"

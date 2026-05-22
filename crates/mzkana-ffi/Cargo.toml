@@ -1,0 +1,16 @@
+[package]
+name = "mzkana-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mzkana"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+mzkana-core = { path = "../mzkana-core" }
+notify = "6"
+tracing = "0.1"
+
+[build-dependencies]
+cbindgen = "0.27"
