@@ -354,7 +354,7 @@ impl StateMachine {
 
     // ── Speculative emit ──────────────────────────────────────────────────────
 
-    fn speculative_emit(&mut self, key: &str, shift: bool, now: Instant) -> Vec<OutputAction> {
+    fn speculative_emit(&mut self, key: &str, _shift: bool, now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
         // Resolve what chord / prefix / postfix candidates exist.
@@ -546,7 +546,7 @@ impl StateMachine {
         None
     }
 
-    fn apply_rule_match(&mut self, rule: RuleMatch, now: Instant) -> Vec<OutputAction> {
+    fn apply_rule_match(&mut self, rule: RuleMatch, _now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
         // Find tentative chars to rewrite
@@ -777,7 +777,7 @@ impl StateMachine {
 
     /// Fire a mutual chord: rewrite any speculative emissions from pending chord keys,
     /// then emit the chord output.
-    fn fire_mutual_chord(&mut self, chord: crate::config::ChordRule, now: Instant) -> Vec<OutputAction> {
+    fn fire_mutual_chord(&mut self, chord: crate::config::ChordRule, _now: Instant) -> Vec<OutputAction> {
         let chord_key_set: HashSet<String> = chord.keys.iter().cloned().collect();
 
         // Pending keys that are part of this chord had speculative kana emitted.
