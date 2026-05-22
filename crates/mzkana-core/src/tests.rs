@@ -78,6 +78,106 @@ fn grid_row_mapping() {
     assert_eq!(l.base_layer.get("s").map(|s| s.as_str()), Some("し"));
 }
 
+#[test]
+fn extended_keys_in_numbered_rows() {
+    // ROW1: tab(0) q(1) ... p(10) bracketleft(11) bracketright(12) backslash(13)
+    // ROW2: caps_lock(0) a(1) ... semicolon(10) quote(11)
+    // ROW3: lshift(0) z(1) ... slash(10) intlro(11)
+    let src = r#"
+[meta]
+name = "ext"
+mode = "kanchoku"
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13
+1  あ い う え お か き く け こ さ  し  す  せ
+2  た ち つ て と な に ぬ ね の は  ひ  ＿  ＿
+3  ま み む め も や ゆ よ ら り る  ろ  ＿  ＿
+"""
+"#;
+    let l = load_layout(src).unwrap();
+    assert_eq!(l.base_layer.get("tab").map(|s| s.as_str()),          Some("あ")); // ROW1[0]
+    assert_eq!(l.base_layer.get("q").map(|s| s.as_str()),            Some("い")); // ROW1[1]
+    assert_eq!(l.base_layer.get("bracketleft").map(|s| s.as_str()),  Some("し")); // ROW1[11]
+    assert_eq!(l.base_layer.get("bracketright").map(|s| s.as_str()), Some("す")); // ROW1[12]
+    assert_eq!(l.base_layer.get("backslash").map(|s| s.as_str()),    Some("せ")); // ROW1[13]
+    assert_eq!(l.base_layer.get("caps_lock").map(|s| s.as_str()),    Some("た")); // ROW2[0]
+    assert_eq!(l.base_layer.get("a").map(|s| s.as_str()),            Some("ち")); // ROW2[1]
+    assert_eq!(l.base_layer.get("quote").map(|s| s.as_str()),        Some("ひ")); // ROW2[11]
+    assert_eq!(l.base_layer.get("lshift").map(|s| s.as_str()),       Some("ま")); // ROW3[0]
+    assert_eq!(l.base_layer.get("z").map(|s| s.as_str()),            Some("み")); // ROW3[1]
+    assert_eq!(l.base_layer.get("intlro").map(|s| s.as_str()),       Some("ろ")); // ROW3[11]
+}
+
+// ── XX passthrough cell ───────────────────────────────────────────────────────
+
+#[test]
+fn xx_cell_base_layer_emits_passthrough() {
+    let src = r#"
+[meta]
+name = "xx-test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. . q w
+1 ＿ あ XX
+"""
+"#;
+    let l = load_layout(src).unwrap();
+    let mut m = StateMachine::new(l);
+    let now = Instant::now();
+    // q → SendKana("あ") as normal
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(a.contains(&OutputAction::SendKana("あ".to_string())), "{a:?}");
+    // w → Passthrough("w") because cell is XX
+    let b = m.process(InputEvent::down("w"), now);
+    assert!(b.contains(&OutputAction::Passthrough("w".to_string())), "{b:?}");
+    assert!(!b.iter().any(|x| matches!(x, OutputAction::SendKana(_))), "{b:?}");
+}
+
+#[test]
+fn xx_cell_modified_layer_emits_passthrough() {
+    let src = r#"
+[meta]
+name = "xx-mod"
+mode = "kana"
+schema = 1
+[[modifier]]
+id   = "m"
+key  = "space"
+kind = "hold"
+hold_detection = "interrupt"
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+[[layer]]
+id       = "shifted"
+kind     = "modified"
+modifier = "m"
+grid     = """
+. . q
+1 ＿ XX
+"""
+"#;
+    let l = load_layout(src).unwrap();
+    let mut m = StateMachine::new(l);
+    let now = Instant::now();
+    // Hold space then press q → modified layer XX → Passthrough("q")
+    m.process(InputEvent::down("space"), now);
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(a.contains(&OutputAction::Passthrough("q".to_string())), "{a:?}");
+    assert!(!a.iter().any(|x| matches!(x, OutputAction::SendKana(_))), "{a:?}");
+}
+
 // ── Single key → kana ─────────────────────────────────────────────────────────
 
 #[test]
@@ -145,6 +245,95 @@ fn chord_symmetric_either_order() {
     let a2 = m.process(InputEvent::down("f"), now);
     assert!(a2.contains(&OutputAction::Backspace));
     assert!(a2.contains(&OutputAction::SendKana("が".to_string())));
+}
+
+// ── Mutual chord / simultaneous chord ────────────────────────────────────────
+
+const MUTUAL_CHORD_LAYOUT: &str = r#"
+[meta]
+name = "mutual-test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. .  q  w  e  r  t  y  u
+1 ＿ ＿ ＿ ＿ る ＿ ＿ す
+"""
+[[chord]]
+keys      = ["f", "j"]
+output    = "が"
+symmetric = true
+[[chord]]
+keys      = ["e", "j"]
+output    = "で"
+symmetric = true
+[[chord]]
+keys      = ["r", "u"]
+output    = "だ"
+symmetric = false
+"#;
+
+#[test]
+fn mutual_chord_fires_on_overlap() {
+    // symmetric=true: fires immediately when both keys are physically held.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // j down: no chord yet (f not held)
+    let a1 = m.process(InputEvent::down("j"), now);
+    // j has no base layer mapping, so no speculative output
+    assert!(a1.is_empty(), "j alone should produce no output: {a1:?}");
+    // f down: now j+f are both held → mutual chord fires immediately
+    let a2 = m.process(InputEvent::down("f"), now);
+    assert!(a2.contains(&OutputAction::SendKana("が".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "が");
+}
+
+#[test]
+fn mutual_chord_rollover() {
+    // After (f j)→「が」fires with j still held, pressing e fires (e j)→「で」.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("j"), now);
+    let a_fg = m.process(InputEvent::down("f"), now);
+    assert!(a_fg.contains(&OutputAction::SendKana("が".to_string())), "{a_fg:?}");
+    m.process(InputEvent::up("f"), now);
+    // j is still held; pressing e triggers (e j) mutual chord
+    let a_ej = m.process(InputEvent::down("e"), now);
+    assert!(a_ej.contains(&OutputAction::SendKana("で".to_string())), "rollover should fire (e,j): {a_ej:?}");
+    // 「が」must NOT have been backspaced
+    assert!(!a_ej.contains(&OutputAction::Backspace), "「が」must not be overwritten: {a_ej:?}");
+    assert_eq!(m.tentative_kana_string(), "がで");
+}
+
+#[test]
+fn mutual_chord_no_timeout_after_window() {
+    // symmetric=true chord fires regardless of timing — even well after chord_window_ms.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    m.process(InputEvent::down("j"), now);
+    // Press f long after any timeout would have expired (500 ms)
+    let late = now + std::time::Duration::from_millis(500);
+    let a = m.process(InputEvent::down("f"), late);
+    assert!(a.contains(&OutputAction::SendKana("が".to_string())), "mutual chord must fire regardless of timing: {a:?}");
+}
+
+#[test]
+fn timed_chord_reverse_order_allowed() {
+    // symmetric=false chord should fire in either key order.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+    // Definition order is ["r","u"]; try u first, then r
+    let a1 = m.process(InputEvent::down("u"), now);
+    assert!(a1.contains(&OutputAction::SendKana("す".to_string())), "u speculative: {a1:?}");
+    let a2 = m.process(InputEvent::down("r"), now);
+    assert!(a2.contains(&OutputAction::Backspace), "{a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("だ".to_string())), "reverse-order timed chord: {a2:?}");
 }
 
 // ── Kanchoku / T-code ─────────────────────────────────────────────────────────
@@ -302,8 +491,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 あ い
+. . q w
+1 ＿ あ い
 """
 [[chord]]
 keys   = ["q", "w"]
@@ -334,8 +523,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 あ !Tab
+. . q w
+1 ＿ あ !Tab
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -377,8 +566,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q
-1 "、 !SuperFakeKey"
+. . q
+1 ＿ "、 !SuperFakeKey"
 """
 "#;
     assert!(load_layout(toml).is_err());
@@ -460,8 +649,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 ku_ret い
+. . q w
+1 ＿ ku_ret い
 """
 [[alias]]
 ku_ret = "、 !Return"
@@ -492,8 +681,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q
-1 "。 !Return"
+. . q
+1 ＿ "。 !Return"
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -523,8 +712,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 ku_ret い
+. . q w
+1 ＿ ku_ret い
 """
 [[chord]]
 keys   = ["q", "w"]
@@ -570,8 +759,8 @@ schema = 1
 id   = "base"
 kind = "single"
 grid = """
-. q w
-1 ku_ret い
+. . q w
+1 ＿ ku_ret い
 """
 [[chord]]
 keys   = ["q", "w"]
@@ -613,7 +802,7 @@ ku_ret = "、 !Return"
 
 // ── tap_action = base_kana ────────────────────────────────────────────────────
 
-// f is row-2 index 3 (a s d f g …); g is index 4.
+// f is row-2 index 4 (caps_lock a s d f g …); g is index 5.
 // Header column labels are visual-only; physical keys come from row position.
 const DUAL_ROLE_LAYOUT: &str = r#"
 [meta]
@@ -632,8 +821,8 @@ tap_action     = "base_kana"
 id   = "base"
 kind = "single"
 grid = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   か   き
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   か   き
 """
 
 [[layer]]
@@ -641,8 +830,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "shift_f"
 grid     = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   ＿   ぎ
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ＿   ぎ
 """
 "#;
 
@@ -726,8 +915,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "m"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -763,8 +952,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "m"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -820,16 +1009,16 @@ hold_detection = "interrupt"
 id   = "base"
 kind = "single"
 grid = """
-. a    s    d    f
-2 ＿   ＿   ＿   ku_ret
+. .    a    s    d    f
+2 ＿   ＿   ＿   ＿   ku_ret
 """
 [[layer]]
 id       = "shifted"
 kind     = "modified"
 modifier = "m"
 grid     = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   ＿   ぎ
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ＿   ぎ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -864,8 +1053,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "caps"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -897,16 +1086,16 @@ kind = "toggle"
 id   = "base"
 kind = "single"
 grid = """
-. q
-1 い
+. . q
+1 ＿ い
 """
 [[layer]]
 id       = "shifted"
 kind     = "modified"
 modifier = "caps"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();
@@ -952,8 +1141,8 @@ tap_action      = "base_kana"
 id   = "base"
 kind = "single"
 grid = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   か   き
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   か   き
 """
 
 [[layer]]
@@ -961,8 +1150,8 @@ id       = "shifted"
 kind     = "modified"
 modifier = "shift_f"
 grid     = """
-. a    s    d    f    g
-2 ＿   ＿   ＿   ＿   ぎ
+. .    a    s    d    f    g
+2 ＿   ＿   ＿   ＿   ＿   ぎ
 """
 "#;
 
@@ -1034,16 +1223,16 @@ kind = "toggle"
 id   = "base"
 kind = "single"
 grid = """
-. q    w
-1 い   う
+. .    q    w
+1 ＿   い   う
 """
 [[layer]]
 id       = "shifted"
 kind     = "modified"
 modifier = "caps"
 grid     = """
-. q
-1 あ
+. . q
+1 ＿ あ
 """
 "#;
     let layout = load_layout(toml).unwrap();

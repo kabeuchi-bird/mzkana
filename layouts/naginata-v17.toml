@@ -35,10 +35,10 @@ to_ret = "。 !Return"
 id   = "base"
 kind = "single"
 grid = """
-. q    w    e    r    t    y    u    i    o    p
-1 ＿   き   て   し   !Up !Down !BackSpace  る   す   へ
-2 ろ   け   と   か   っ   く   あ   い   う   ー
-3 ほ   ひ   は   こ   そ   た   な   ん   ら   れ
+. .    q    w    e    r    t    y    u    i    o    p
+1 ＿   ＿   き   て   し   !Up !Down !BackSpace  る   す   へ
+2 ＿   ろ   け   と   か   っ   く   あ   い   う   ー
+3 ＿   ほ   ひ   は   こ   そ   た   な   ん   ら   れ
 """
 
 # ── センターシフト層 ──────────────────────────────────────────────────────────
@@ -47,10 +47,10 @@ id       = "center_shift"
 kind     = "modified"
 modifier = "center"
 grid     = """
-. q    w    e    r    t    y    u    i    o    p
-1 ＿   め   り   ね   ＿   ＿   さ   よ   え   ゆ
-2 せ   み   に   ま   ち   や   の   も   つ   ふ
-3 ほ   ひ   を ku_ret ぬ   お to_ret む   わ   れ
+. .    q    w    e    r    t    y    u    i    o    p
+1 ＿   ＿   め   り   ね   ＿   ＿   さ   よ   え   ゆ
+2 ＿   せ   み   に   ま   ち   や   の   も   つ   ふ
+3 ＿   ほ   ひ   を ku_ret ぬ   お to_ret む   わ   れ
 """
 
 # ── 相互シフト（濁音・拗音など） ──────────────────────────────────────────────

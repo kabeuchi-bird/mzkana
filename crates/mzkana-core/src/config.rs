@@ -264,15 +264,19 @@ pub static VALID_FUNCTION_KEYS: phf::Set<&'static str> = phf::phf_set! {
 
 // ── Grid parsing ──────────────────────────────────────────────────────────────
 
+/// Sentinel stored in layer maps for grid cells marked `XX` (key passthrough).
+/// Must not appear in normal kana/alias output.
+pub const PASSTHROUGH_CELL: &str = "\x00pt";
+
 /// QWERTY keyboard rows used for implicit row-to-key mapping.
-///   row 0 → number row (1 2 3 4 5 6 7 8 9 0 minus equal)
-///   row 1 → top row    (q w e r t y u i o p)
-///   row 2 → home row   (a s d f g h j k l ;)
-///   row 3 → bottom row (z x c v b n m , . /)
+///   row 0 → number row (1 2 3 4 5 6 7 8 9 0 minus equal yen)
+///   row 1 → top row    (tab q w e r t y u i o p bracketleft bracketright backslash)
+///   row 2 → home row   (caps_lock a s d f g h j k l semicolon quote)
+///   row 3 → bottom row (lshift z x c v b n m comma period slash intlro)
 const QWERTY_ROW0: &[&str] = &["1","2","3","4","5","6","7","8","9","0","minus","equal","yen"];
-const QWERTY_ROW1: &[&str] = &["q","w","e","r","t","y","u","i","o","p"];
-const QWERTY_ROW2: &[&str] = &["a","s","d","f","g","h","j","k","l","semicolon"];
-const QWERTY_ROW3: &[&str] = &["z","x","c","v","b","n","m","comma","period","slash"];
+const QWERTY_ROW1: &[&str] = &["tab","q","w","e","r","t","y","u","i","o","p","bracketleft","bracketright","backslash"];
+const QWERTY_ROW2: &[&str] = &["caps_lock","a","s","d","f","g","h","j","k","l","semicolon","quote"];
+const QWERTY_ROW3: &[&str] = &["lshift","z","x","c","v","b","n","m","comma","period","slash","intlro"];
 
 /// Parse a grid string into a map of key_id → kana.
 ///
@@ -349,7 +353,8 @@ pub fn parse_grid(grid: &str) -> Result<HashMap<String, String>> {
             if *value == "＿" || *value == "." || value.is_empty() {
                 continue;
             }
-            map.insert(key_row[i].to_string(), value.to_string());
+            let stored = if *value == "XX" { PASSTHROUGH_CELL } else { value.as_str() };
+            map.insert(key_row[i].to_string(), stored.to_string());
         }
     }
 
@@ -366,7 +371,7 @@ pub(crate) fn tokenize_grid_row(s: &str) -> Vec<String> {
 
     loop {
         // Skip whitespace between tokens
-        while chars.peek().map_or(false, |c| c.is_ascii_whitespace()) {
+        while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
             chars.next();
         }
         match chars.peek() {
@@ -382,7 +387,7 @@ pub(crate) fn tokenize_grid_row(s: &str) -> Vec<String> {
             }
             _ => {
                 let mut tok = String::new();
-                while chars.peek().map_or(false, |c| !c.is_ascii_whitespace()) {
+                while chars.peek().is_some_and(|c| !c.is_ascii_whitespace()) {
                     tok.push(chars.next().unwrap());
                 }
                 tokens.push(tok);

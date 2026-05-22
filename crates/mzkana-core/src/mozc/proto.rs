@@ -180,14 +180,12 @@ pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::Decod
         }
     };
 
-    let mut out = DecodedOutput::default();
-
-    // Output.id = 1
-    out.session_id = find_varint(&out_fields, 1);
-    // Output.mode = 2
-    out.mode = find_varint(&out_fields, 2).unwrap_or(0) as i32;
-    // Output.consumed = 3
-    out.consumed = find_varint(&out_fields, 3).map(|v| v != 0).unwrap_or(false);
+    let mut out = DecodedOutput {
+        session_id: find_varint(&out_fields, 1),
+        mode: find_varint(&out_fields, 2).unwrap_or(0) as i32,
+        consumed: find_varint(&out_fields, 3).map(|v| v != 0).unwrap_or(false),
+        ..Default::default()
+    };
     // Output.result = 4
     if let Some(result_fields) = find_msg(&out_fields, 4)? {
         // Result.value = 2

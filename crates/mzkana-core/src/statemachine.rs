@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::config::{HoldDetection, Layout, LayoutMode, ModifierKind, TapAction, TriggerKind};
@@ -122,6 +122,8 @@ pub struct StateMachine {
     mozc_mode: MozcMode,
     /// Chord timer: tracks the earliest rewrite_deadline in tentative_buffer.
     chord_deadline: Option<Instant>,
+    /// Physically held regular (non-modifier, non-trigger) keys, for mutual chord detection.
+    held_keys: HashSet<String>,
 }
 
 impl StateMachine {
@@ -149,6 +151,7 @@ impl StateMachine {
             direct_trigger_interrupted: false,
             mozc_mode: MozcMode::Composition,
             chord_deadline: None,
+            held_keys: HashSet::new(),
         }
     }
 
@@ -167,6 +170,7 @@ impl StateMachine {
         self.direct_trigger_state = DirectTriggerState::Inactive;
         self.direct_trigger_held = false;
         self.direct_trigger_interrupted = false;
+        self.held_keys.clear();
         actions
     }
 
@@ -178,7 +182,7 @@ impl StateMachine {
             if now >= deadline {
                 // Confirm all expired tentative chars and emit any deferred tail tokens.
                 for tc in &mut self.tentative_buffer {
-                    if tc.rewrite_deadline.map_or(false, |d| now >= d) {
+                    if tc.rewrite_deadline.is_some_and(|d| now >= d) {
                         tc.rewrite_deadline = None;
                         for token in tc.pending_tail.drain(..) {
                             actions.push(Self::make_output_action(&token));
@@ -232,6 +236,9 @@ impl StateMachine {
             return self.handle_direct_trigger_down(key, now);
         }
 
+        // Track held regular keys for mutual chord detection.
+        self.held_keys.insert(key.to_string());
+
         // Mark modifiers as interrupted (for center-shift interrupt detection)
         for ms in &mut self.modifier_states {
             if ms.held {
@@ -264,8 +271,10 @@ impl StateMachine {
             for ms in &mut self.modifier_states {
                 ms.oneshot_pending = false;
             }
-            let mut actions = Vec::new();
-            actions.push(OutputAction::SendKana(mod_output.clone()));
+            if mod_output == crate::config::PASSTHROUGH_CELL {
+                return vec![OutputAction::Passthrough(key.to_string())];
+            }
+            let actions = vec![OutputAction::SendKana(mod_output.clone())];
             self.tentative_buffer.push(TentativeChar {
                 kana: mod_output,
                 source_keys: vec![key.to_string()],
@@ -276,6 +285,12 @@ impl StateMachine {
             return actions;
         }
 
+        // Mutual chord (symmetric=true): fire immediately when all keys are held.
+        // Checked before pending_keys.push so the new key hasn't been speculatively emitted yet.
+        if let Some(chord) = self.find_mutual_chord_match(key) {
+            return self.fire_mutual_chord(chord, now);
+        }
+
         // Normal key: speculative emit
         self.pending_keys.push((key.to_string(), now));
         self.speculative_emit(key, shift, now)
@@ -284,6 +299,8 @@ impl StateMachine {
     // ── Key Up ────────────────────────────────────────────────────────────────
 
     fn process_key_up(&mut self, key: &str, now: Instant) -> Vec<OutputAction> {
+        self.held_keys.remove(key);
+
         // Modifier key released
         if let Some(idx) = self.modifier_index(key) {
             let kind = self.layout.modifiers[idx].kind;
@@ -347,8 +364,12 @@ impl StateMachine {
     fn speculative_emit(&mut self, key: &str, shift: bool, now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
-        // Resolve what chord / prefix / postfix candidates exist
-        let has_chord_candidate = self.has_chord_candidate(key);
+        // Resolve what chord / prefix / postfix candidates exist.
+        // Timed chords (symmetric=false) use a deadline window.
+        // Mutual chords (symmetric=true) fire via held_keys, so they use no deadline here
+        // but still require speculative emission to allow later rewriting.
+        let has_timed_chord = self.has_timed_chord_candidate(key);
+        let has_mutual_chord = self.has_mutual_chord_candidate(key);
         let has_prefix_continuation = self.has_prefix_continuation();
         let has_postfix_candidate = self.has_postfix_candidate(key);
 
@@ -370,9 +391,22 @@ impl StateMachine {
         }
 
         let Some(output) = base_kana else {
-            // No base assignment for this key (e.g. pure trigger key) — don't send tentative
+            // No base assignment for this key. Keep in pending_keys only if it may
+            // participate in a timed chord (timed chord detection reads pending_keys).
+            // Mutual chords fire via held_keys before pending_keys.push, so they don't
+            // need the key here.
+            if !has_timed_chord {
+                self.pending_keys.pop();
+            }
             return actions;
         };
+
+        if output == crate::config::PASSTHROUGH_CELL {
+            // Passthrough keys are sent directly to the application and don't participate
+            // in chord matching, so remove the pending entry to prevent spurious matches.
+            self.pending_keys.pop();
+            return vec![OutputAction::Passthrough(key.to_string())];
+        }
 
         // Resolve to token sequence (alias / quoted sequence / single token)
         let tokens: Vec<String> = self
@@ -382,14 +416,14 @@ impl StateMachine {
             .collect();
 
         // A leading function-key token: emit entire sequence immediately (non-speculative)
-        if tokens.first().map_or(false, |t| t.starts_with('!')) {
+        if tokens.first().is_some_and(|t| t.starts_with('!')) {
             self.pending_keys.clear();
             let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
             return self.emit_sequence(&refs, vec![key.to_string()], None, now);
         }
 
         let needs_speculation =
-            has_chord_candidate || has_prefix_continuation || has_postfix_candidate;
+            has_timed_chord || has_mutual_chord || has_prefix_continuation || has_postfix_candidate;
 
         // Multi-token with no speculation needed: emit all immediately
         if tokens.len() > 1 && !needs_speculation {
@@ -400,11 +434,21 @@ impl StateMachine {
 
         // Speculative emit of first kana; tail (if any) deferred until confirmed
         let kana = tokens[0].clone();
-        let pending_tail: Vec<String> = tokens[1..].iter().cloned().collect();
+        let pending_tail: Vec<String> = tokens[1..].to_vec();
         actions.push(OutputAction::SendKana(kana.clone()));
 
-        let rewrite_deadline = if has_chord_candidate {
+        let rewrite_deadline = if has_timed_chord {
             let window = self.chord_window_for(key);
+            let deadline = now + Duration::from_millis(window as u64);
+            self.chord_deadline = Some(match self.chord_deadline {
+                Some(existing) => existing.min(deadline),
+                None => deadline,
+            });
+            Some(deadline)
+        } else if has_mutual_chord {
+            // Use mutual_window_ms as the confirmation deadline so that tick() can flush
+            // any deferred tail tokens (e.g. multi-token output) if no chord fires.
+            let window = self.layout.settings.mutual_window_ms;
             let deadline = now + Duration::from_millis(window as u64);
             self.chord_deadline = Some(match self.chord_deadline {
                 Some(existing) => existing.min(deadline),
@@ -500,14 +544,13 @@ impl StateMachine {
         let key_set: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
 
         for chord in &self.layout.chords {
+            // Mutual chords (symmetric=true) are handled by the held_keys mechanism.
+            if chord.symmetric {
+                continue;
+            }
             let chord_set: BTreeSet<&str> = chord.keys.iter().map(String::as_str).collect();
             if chord_set == key_set {
-                // For non-symmetric chords, verify order matches
-                if !chord.symmetric && keys.len() == chord.keys.len() {
-                    if keys.iter().zip(chord.keys.iter()).any(|(a, b)| a != b) {
-                        continue;
-                    }
-                }
+                // Both key orders are accepted for timed chords.
                 return Some(RuleMatch {
                     output: chord.output.clone(),
                     source_keys: keys.to_vec(),
@@ -607,7 +650,7 @@ impl StateMachine {
         self.layout
             .direct_trigger
             .as_ref()
-            .map_or(false, |dt| dt.keys.iter().any(|k| k == key))
+            .is_some_and(|dt| dt.keys.iter().any(|k| k == key))
     }
 
     fn handle_direct_trigger_down(&mut self, _key: &str, _now: Instant) -> Vec<OutputAction> {
@@ -740,11 +783,56 @@ impl StateMachine {
         self.layout.modifiers.iter().position(|m| m.key == key)
     }
 
-    fn has_chord_candidate(&self, key: &str) -> bool {
-        self.layout
-            .chords
-            .iter()
-            .any(|c| c.keys.iter().any(|k| k == key) && c.keys.len() > 1)
+    /// Return the first mutual chord (symmetric=true) whose key set is a subset of
+    /// `held_keys` and that includes `new_key`. Called before the new key enters pending_keys.
+    fn find_mutual_chord_match(&self, new_key: &str) -> Option<crate::config::ChordRule> {
+        for chord in &self.layout.chords {
+            if !chord.symmetric { continue; }
+            if !chord.keys.iter().any(|k| k == new_key) { continue; }
+            if chord.keys.iter().all(|k| self.held_keys.contains(k)) {
+                return Some(chord.clone());
+            }
+        }
+        None
+    }
+
+    /// Fire a mutual chord: rewrite any speculative emissions from pending chord keys,
+    /// then emit the chord output.
+    fn fire_mutual_chord(&mut self, chord: crate::config::ChordRule, now: Instant) -> Vec<OutputAction> {
+        let chord_key_set: HashSet<String> = chord.keys.iter().cloned().collect();
+
+        // Pending keys that are part of this chord had speculative kana emitted.
+        let pending_chord: HashSet<String> = self.pending_keys.iter()
+            .map(|(k, _)| k.clone())
+            .filter(|k| chord_key_set.contains(k))
+            .collect();
+
+        let affected = self.tentative_buffer.iter().rev()
+            .take_while(|tc| tc.source_keys.iter().any(|k| pending_chord.contains(k)))
+            .count();
+
+        let mut actions: Vec<OutputAction> = std::iter::repeat_n(OutputAction::Backspace, affected).collect();
+        self.tentative_buffer.truncate(self.tentative_buffer.len() - affected);
+
+        self.pending_keys.retain(|(k, _)| !chord_key_set.contains(k));
+
+        let output = chord.output.clone();
+        let source_keys = chord.keys.clone();
+        let tokens: Vec<String> = self.resolve_sequence(&output).iter().map(|s| s.to_string()).collect();
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let seq = self.emit_sequence(&refs, source_keys, None, now);
+        actions.extend(seq);
+
+        self.update_chord_deadline();
+        actions
+    }
+
+    fn has_timed_chord_candidate(&self, key: &str) -> bool {
+        self.layout.chords.iter().any(|c| !c.symmetric && c.keys.iter().any(|k| k == key) && c.keys.len() > 1)
+    }
+
+    fn has_mutual_chord_candidate(&self, key: &str) -> bool {
+        self.layout.chords.iter().any(|c| c.symmetric && c.keys.iter().any(|k| k == key) && c.keys.len() > 1)
     }
 
     fn has_prefix_continuation(&self) -> bool {
@@ -772,14 +860,14 @@ impl StateMachine {
     }
 
     fn chord_window_for(&self, key: &str) -> u32 {
-        // Check for per-chord override
+        // Only timed chords (symmetric=false) use a window; mutual chords fire on overlap.
         for chord in &self.layout.chords {
+            if chord.symmetric {
+                continue;
+            }
             if chord.keys.iter().any(|k| k == key) {
                 if let Some(w) = chord.window_ms {
                     return w;
-                }
-                if chord.symmetric {
-                    return self.layout.settings.mutual_window_ms;
                 }
             }
         }
@@ -849,7 +937,7 @@ impl StateMachine {
     fn flush_tentative(&mut self) -> Vec<OutputAction> {
         let count = self.tentative_buffer.len();
         self.tentative_buffer.clear();
-        std::iter::repeat(OutputAction::Backspace).take(count).collect()
+        std::iter::repeat_n(OutputAction::Backspace, count).collect()
     }
 
     // ── Mozc output feedback ──────────────────────────────────────────────────
