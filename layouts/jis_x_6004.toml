@@ -1,0 +1,54 @@
+﻿# ============================================================
+# 新JIS配列
+# ============================================================
+
+[meta]
+name    = "新JIS配列"
+version = "JIS X 6004"
+mode    = "kana"
+schema  = 1
+
+[settings]
+chord_window_ms    = 50
+mutual_window_ms   = 80
+caps_lock_behavior = "shift"
+on_focus_change    = "preserve"
+roll_over          = true
+
+# ── センターシフト定義 ────────────────────────────────────────────────────────
+[[modifier]]
+id              = "center"
+key             = "space"
+kind            = "hold"
+hold_detection  = "interrupt"
+hold_timeout_ms = 150
+tap_action      = "send_key"
+
+# ── 別名シーケンス定義 ────────────────────────────────────────────────────────
+# グリッドや chord の output フィールドで `ku_ret` / `to_ret` を参照できます。
+[[alias]]
+ku_ret = "、 !Return"
+to_ret = "。 !Return"
+
+# ── Base layer ────────────────────────────────────────────────────────────────
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+.    q    w    e    r    t    y    u    i    o    p
+1 ＿ そ   け   せ   て   ょ   つ   ん   の   を   り   ち
+2 ＿ は   か   し   と   た   く   う   い   ゛   き   な
+3 ＿ す   こ   に   さ   あ   っ   る   、   。   れ
+"""
+
+# ── センターシフト層 ──────────────────────────────────────────────────────────
+[[layer]]
+id       = "center_shift"
+kind     = "modified"
+modifier = "center"
+grid     = """
+.    q    w    e    r    t    y    u    i    o    p
+1 ＿ ぁ   ゜   ほ   ふ   め   ひ   え   み   や   ぬ   「
+2 ＿ ぃ   へ   ら   ゅ   よ   ま   お   も   わ   ゆ   」
+3 ＿ ぅ   ぇ   ぉ   ね   ゃ   む   ろ   ・   ー
+"""
