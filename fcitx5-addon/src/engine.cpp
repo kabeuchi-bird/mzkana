@@ -36,13 +36,6 @@ std::string MzkanaFcitxEngine::defaultConfigPath() const {
     return std::string(home) + "/.config/fcitx5/conf/mzkana/layout.toml";
 }
 
-std::vector<fcitx::InputMethodEntry> MzkanaFcitxEngine::listInputMethods() {
-    std::vector<fcitx::InputMethodEntry> entries;
-    entries.emplace_back("mzkana", "MzKana", "ja", "mzkana");
-    entries.back().setLabel("か");
-    return entries;
-}
-
 void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
                                   fcitx::KeyEvent &keyEvent) {
     tryInitEngine();

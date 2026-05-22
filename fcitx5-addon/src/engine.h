@@ -7,7 +7,6 @@
 
 #include <memory>
 #include <string>
-#include <vector>
 
 extern "C" {
 #include "mzkana.h"
@@ -19,8 +18,6 @@ class MzkanaFcitxEngine : public fcitx::InputMethodEngineV2 {
 public:
     explicit MzkanaFcitxEngine(fcitx::Instance *instance);
     ~MzkanaFcitxEngine() override;
-
-    std::vector<fcitx::InputMethodEntry> listInputMethods() override;
 
     void keyEvent(const fcitx::InputMethodEntry &entry,
                   fcitx::KeyEvent &keyEvent) override;

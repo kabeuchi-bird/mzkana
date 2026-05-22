@@ -16,4 +16,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
+    // Set SONAME so the dynamic linker stores "libmzkana.so" (not the build-dir
+    // absolute path) in the NEEDED entry of fcitx5-mzkana.so.
+    println!("cargo:rustc-link-arg=-Wl,-soname,libmzkana.so");
 }
