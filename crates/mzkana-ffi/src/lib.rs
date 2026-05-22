@@ -14,9 +14,7 @@ use engine::Engine;
 // ── Public opaque type ────────────────────────────────────────────────────────
 
 /// Opaque engine handle returned by `mzkana_engine_create`.
-pub struct MzkanaEngine {
-    inner: Engine,
-}
+pub struct MzkanaEngine(Engine);
 
 // ── Result struct ─────────────────────────────────────────────────────────────
 
@@ -118,7 +116,7 @@ pub unsafe extern "C" fn mzkana_engine_create(
     };
 
     match Engine::new(Path::new(config_str), socket.as_deref()) {
-        Ok(inner) => Box::into_raw(Box::new(MzkanaEngine { inner })),
+        Ok(inner) => Box::into_raw(Box::new(MzkanaEngine(inner))),
         Err(e) => {
             eprintln!("mzkana_engine_create: {e}");
             std::ptr::null_mut()
@@ -162,7 +160,7 @@ pub unsafe extern "C" fn mzkana_engine_key_down(
         Ok(s) => s,
         Err(_) => return MzkanaResult::default(),
     };
-    result_from(engine.inner.key_event(key, true, shift != 0))
+    result_from(engine.0.key_event(key, true, shift != 0))
 }
 
 /// Process a key-up event.
@@ -183,7 +181,7 @@ pub unsafe extern "C" fn mzkana_engine_key_up(
         Ok(s) => s,
         Err(_) => return MzkanaResult::default(),
     };
-    result_from(engine.inner.key_event(key, false, false))
+    result_from(engine.0.key_event(key, false, false))
 }
 
 /// Advance internal timers.  Call from an fcitx5 timer callback with the
@@ -197,7 +195,7 @@ pub unsafe extern "C" fn mzkana_engine_tick(engine: *mut MzkanaEngine) -> Mzkana
         return MzkanaResult::default();
     }
     let engine = &mut *engine;
-    result_from(engine.inner.tick())
+    result_from(engine.0.tick())
 }
 
 /// Reset engine state (call on focus loss or IM deactivation).
@@ -208,7 +206,7 @@ pub unsafe extern "C" fn mzkana_engine_tick(engine: *mut MzkanaEngine) -> Mzkana
 #[no_mangle]
 pub unsafe extern "C" fn mzkana_engine_reset(engine: *mut MzkanaEngine) {
     if let Some(engine) = engine.as_mut() {
-        engine.inner.reset();
+        engine.0.reset();
     }
 }
 
@@ -223,6 +221,6 @@ pub unsafe extern "C" fn mzkana_engine_reset(engine: *mut MzkanaEngine) {
 pub unsafe extern "C" fn mzkana_engine_check_reload(engine: *mut MzkanaEngine) -> u8 {
     engine
         .as_mut()
-        .map(|e| e.inner.check_reload() as u8)
+        .map(|e| e.0.check_reload() as u8)
         .unwrap_or(0)
 }
