@@ -29,6 +29,32 @@ reviews:
         - serde/schemars derive の正確さ（フィールド名の snake_case 変換）
         - エラーメッセージの明確さ
 
+    - path: "crates/mzkana-ffi/src/**"
+      instructions: |
+        Rust → C ABI ブリッジ層です。以下を確認してください。
+        - Safety コメントが各 unsafe fn に付いているか
+        - NULL ポインタ / 不正ポインタに対するガード（mzkana_engine_destroy(NULL) など）
+        - MzkanaResult のバッファサイズ（preedit 512B / commit 512B / passthrough_key 64B）がオーバーフローしないか
+        - cbindgen.toml と実際のシグネチャが一致しているか（生成後の include/mzkana.h との差分）
+
+    - path: "fcitx5-addon/src/**"
+      instructions: |
+        Fcitx5 C++ アドオン（InputMethodEngineV2 実装）です。以下を確認してください。
+        - keyEvent: Ctrl/Alt/Super/Hyper + bare modifier を正しくスキップしているか
+        - 大文字キーシムの小文字正規化ロジックが正確か（FcitxKey_A–Z の範囲外を巻き込まないか）
+        - applyResult: setClientPreedit と setPreedit の両方を更新し、updatePreedit / updateUserInterface を呼んでいるか
+        - reset/deactivate: clearPreedit を必ず呼んでいるか（preedit の幽霊残留を防ぐ）
+        - mzkana_engine_check_reload の呼び出しタイミング（毎キーイベント or タイマー）が適切か
+        - engine_ が nullptr の場合（設定ファイル未作成時）に keyEvent でクラッシュしないか
+
+    - path: "fcitx5-addon/CMakeLists.txt"
+      instructions: |
+        CMake ビルド定義です。以下を確認してください。
+        - find_package(Fcitx5Core) フォールバック（Strategy A / B）が正しく機能するか
+        - FCITX5_USE_SRC_HEADERS=ON 時にスタブヘッダパスが競合しないか
+        - MODULE ターゲットに PREFIX "" が設定されているか（fcitx5 のアドオン命名規則）
+        - install() のパスが実際の fcitx5 インストール先と一致しているか
+
     - path: "layouts/*.toml"
       instructions: |
         配列定義ファイルです。以下を確認してください。

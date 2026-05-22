@@ -1,0 +1,6 @@
+#pragma once
+#define FCITXUTILS_EXPORT __attribute__((visibility("default")))
+#define FCITXUTILS_NO_EXPORT __attribute__((visibility("hidden")))
+#define FCITXUTILS_DEPRECATED [[deprecated]]
+#define FCITXUTILS_DEPRECATED_EXPORT FCITXUTILS_EXPORT FCITXUTILS_DEPRECATED
+#define FCITXUTILS_DEPRECATED_NO_EXPORT FCITXUTILS_NO_EXPORT FCITXUTILS_DEPRECATED

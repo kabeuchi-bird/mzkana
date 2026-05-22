@@ -12,6 +12,7 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 - **Mozc IPC クライアント** — Unix ドメインソケット経由で mozc_server に直接接続
 - **機能キー出力** — `!Return` / `!Tab` など機能キーをグリッドや chord に埋め込み可能
 - **エイリアス / 複数トークン出力** — `[[alias]]` で名前付きシーケンスを定義し、グリッドや chord から参照
+- **Fcitx5 アドオン** — C++ シムレイヤー経由でインライン preedit・コミット・ホットリロードに対応
 
 ## リポジトリ構成
 
@@ -20,7 +21,12 @@ mzkana/
 ├── crates/
 │   ├── mzkana-core/        # 状態機械・設定パーサ・Mozc IPCクライアント（ライブラリ）
 │   │   └── src/mozc/       # protobufコーデック + UDSクライアント
-│   └── mzkana-cli/         # 検証・デバッグ用 CLI ツール
+│   ├── mzkana-cli/         # 検証・デバッグ用 CLI ツール
+│   └── mzkana-ffi/         # C ABI ラッパー（cbindgen で mzkana.h を生成）
+├── fcitx5-addon/           # Fcitx5 C++ アドオン
+│   ├── src/engine.cpp/.h   # InputMethodEngineV2 実装
+│   ├── data/               # mzkana.conf / mzkana.desktop
+│   └── cmake/include/      # スタブエクスポートヘッダ（-dev 不要ビルド用）
 ├── layouts/                # サンプル配列定義
 │   ├── tsuki-2-263.toml    # 月配列 2-263 式（前置シフト）
 │   ├── shin-geta.toml      # 新下駄配列（同時シフト）
@@ -31,12 +37,68 @@ mzkana/
 
 ## ビルド
 
+### Rust ライブラリ・CLI
+
 ```sh
 cargo build
 ```
 
 Mozc のインストールは不要でビルドできます。  
 `mozc-run` サブコマンドの実行時のみ `mozc_server` の起動が必要です。
+
+### Fcitx5 アドオン
+
+アドオンのビルドには **Rust リリースビルド**（`libmzkana.so`）と fcitx5 ヘッダが必要です。
+
+#### A. `libfcitx5-core-dev` がインストール済みの場合（推奨）
+
+```sh
+sudo apt install libfcitx5-core-dev cmake
+
+cargo build --release -p mzkana-ffi
+
+cmake -B build fcitx5-addon
+cmake --build build
+sudo cmake --install build
+```
+
+#### B. ランタイムパッケージのみの場合（-dev 不要）
+
+```sh
+# fcitx5 ソースツリーからヘッダを取得（sparse checkout）
+git clone --depth=1 --filter=blob:none --sparse \
+    https://github.com/fcitx/fcitx5.git /tmp/fcitx5-src
+git -C /tmp/fcitx5-src sparse-checkout set src/lib
+
+# unversioned シンボリックリンクをビルドディレクトリ内に作成（sudo 不要・システム変更なし）
+mkdir -p build/fcitx5-link
+ln -sf "$(find /usr/lib -name 'libFcitx5Core.so.*' | grep -v '\.so\.[0-9]*\.' | head -1)" \
+       build/fcitx5-link/libFcitx5Core.so
+ln -sf "$(find /usr/lib -name 'libFcitx5Utils.so.*' | grep -v '\.so\.[0-9]*\.' | head -1)" \
+       build/fcitx5-link/libFcitx5Utils.so
+
+cargo build --release -p mzkana-ffi
+
+cmake -B build fcitx5-addon \
+  -DFCITX5_USE_SRC_HEADERS=ON \
+  -DFCITX5_CORE_LIB="$PWD/build/fcitx5-link/libFcitx5Core.so" \
+  -DFCITX5_UTILS_LIB="$PWD/build/fcitx5-link/libFcitx5Utils.so"
+cmake --build build
+sudo cmake --install build
+```
+
+#### アドオン設定ファイルの配置
+
+```sh
+mkdir -p ~/.config/fcitx5/conf/mzkana
+cp layouts/naginata-v17.toml ~/.config/fcitx5/conf/mzkana/layout.toml
+```
+
+配置後、fcitx5 を再起動するか `fcitx5-remote -r` で再ロードしてください。
+
+#### ホットリロード
+
+`~/.config/fcitx5/conf/mzkana/layout.toml` を編集・保存すると、次のキーイベント時に自動的に再ロードされます（fcitx5 の再起動不要）。
 
 ## CLI ツール
 
@@ -185,13 +247,35 @@ output   = "日"
 - **外部依存**: prost / protoc 不要（Mozc の proto2 group 型に対応した独自コーデックを内蔵）
 - **セッション管理**: 接続時に `CREATE_SESSION`、切断時に `DELETE_SESSION` を自動実行
 
+## Fcitx5 アドオンのアーキテクチャ
+
+```text
+キーイベント
+    │
+    ▼
+fcitx5-mzkana.so  (C++, InputMethodEngineV2)
+    │  key_name + shift フラグに正規化
+    ▼
+libmzkana.so  (Rust FFI, mzkana-ffi)
+    │  MzkanaResult { consumed, preedit, commit, passthrough_key }
+    ▼
+MzkanaEngine  (mzkana-core)
+    ├─ 状態機械（シフト / chord / 漢直）
+    └─ Mozc IPC クライアント（preedit 同期・投機的送信）
+```
+
+- `mzkana_engine_key_down` / `mzkana_engine_key_up` — キーイベントを処理し `MzkanaResult` を返す
+- `mzkana_engine_tick` — chord ウィンドウタイマーを進める
+- `mzkana_engine_check_reload` — inotify でレイアウトファイルの変更を検出し自動リロード
+- `mzkana_engine_reset` — フォーカス喪失・IM 切り替え時に状態をリセット
+
 ## 実装フェーズ
 
 | Phase | 内容 | 状態 |
 |---|---|---|
 | 1 | 状態機械・設定パーサ・CLI（全シフト方式・漢直） | ✅ 完了 |
 | 2 | Mozc IPC クライアント・`mozc-run` サブコマンド | ✅ 完了 |
-| 3 | Fcitx5 アドオン化（C++ シム + preedit 同期） | 未着手 |
+| 3 | Fcitx5 アドオン化（C++ シム + preedit 同期 + ホットリロード） | ✅ 完了 |
 | 4 | 設定 GUI（egui） | 未着手 |
 
 ## テスト
@@ -200,7 +284,7 @@ output   = "日"
 cargo test
 ```
 
-57 件のテストがあります。Mozc のインストールは不要です。
+65 件のテストがあります。Mozc のインストールは不要です。
 
 ## ライセンス
 
