@@ -126,22 +126,7 @@ fcitx5-configtool
 
 ### 3. レイアウトファイルを選ぶ
 
-MzKana はレイアウトファイルを読み込むので、使用する配列を配置しておく必要があります。
-
-```sh
-mkdir -p ~/.config/fcitx5/conf/mzkana
-
-# 例: 薙刀式 v17
-cp layouts/naginata-v17.toml ~/.config/fcitx5/conf/mzkana/layout.toml
-
-# 例: 月配列 2-263
-cp layouts/tsuki-2-263.toml  ~/.config/fcitx5/conf/mzkana/layout.toml
-
-# 例: 新下駄配列
-cp layouts/shin-geta.toml    ~/.config/fcitx5/conf/mzkana/layout.toml
-```
-
-ファイルを保存すると次のキーイベント時に自動再ロードされます（fcitx5 の再起動不要）。
+レイアウトファイルの配置方法と利用可能な配列については、上記の「アドオン設定ファイルの配置」と「ホットリロード」の項を参照してください。
 
 ### 4. アドオンの有効・無効を切り替える
 
