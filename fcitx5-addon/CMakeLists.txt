@@ -15,44 +15,72 @@ set(MZKANA_RUST_TARGET "${CMAKE_SOURCE_DIR}/../target/release"
 set(MZKANA_FFI_INCLUDE "${CMAKE_SOURCE_DIR}/../crates/mzkana-ffi/include"
     CACHE PATH "Directory containing mzkana.h")
 
-# fcitx5 source headers (sparse checkout from GitHub)
-set(FCITX5_SRC_INCLUDE "/tmp/fcitx5-src/src/lib"
-    CACHE PATH "fcitx5 src/lib directory with fcitx/ fcitx-utils/ fcitx-config/")
-
-# Stub generated headers (fcitxcore_export.h etc.) supplied in this tree
-set(FCITX5_STUB_INCLUDE "${CMAKE_SOURCE_DIR}/cmake/include"
-    CACHE PATH "Stub export headers for fcitx5")
-
-# Installed fcitx5 shared libraries (from libfcitx5core7 / libfcitx5utils2)
-set(FCITX5_CORE_LIB "/usr/lib/x86_64-linux-gnu/libFcitx5Core.so"
-    CACHE FILEPATH "libFcitx5Core shared library")
-set(FCITX5_UTILS_LIB "/usr/lib/x86_64-linux-gnu/libFcitx5Utils.so"
-    CACHE FILEPATH "libFcitx5Utils shared library")
-
-# Install destinations
+# Install destinations – override if your fcitx5 is in a non-standard prefix
 set(FCITX5_ADDON_DIR "/usr/lib/x86_64-linux-gnu/fcitx5"
     CACHE PATH "fcitx5 addon install directory")
 set(FCITX5_DATA_DIR "/usr/share/fcitx5"
     CACHE PATH "fcitx5 data install directory")
 
-# ── Imported targets ──────────────────────────────────────────────────────────
+# ── fcitx5 header / library resolution ───────────────────────────────────────
+#
+# Strategy A (preferred): libfcitx5-core-dev is installed → use find_package.
+# Strategy B (fallback): use a sparse checkout of the fcitx5 source tree for
+#   headers and link directly against the installed versioned .so files.
+#
+# Strategy B is invoked automatically when find_package fails, or when
+# FCITX5_USE_SRC_HEADERS=ON is set explicitly.
+
+option(FCITX5_USE_SRC_HEADERS
+    "Force use of fcitx5 source-tree headers instead of installed -dev headers"
+    OFF)
+
+if(NOT FCITX5_USE_SRC_HEADERS)
+    find_package(Fcitx5Core 5.0 QUIET)
+endif()
+
+if(Fcitx5Core_FOUND AND NOT FCITX5_USE_SRC_HEADERS)
+    message(STATUS "Using installed fcitx5 CMake config (${Fcitx5Core_VERSION})")
+    # Fcitx5Core provides Fcitx5::Core and Fcitx5::Utils targets.
+    # Nothing else to do here.
+else()
+    message(STATUS "fcitx5-core CMake config not found; using source-tree headers")
+
+    # Location of the fcitx5 source lib directory.
+    # Default: /tmp/fcitx5-src from sparse checkout; override for other paths.
+    set(FCITX5_SRC_INCLUDE "/tmp/fcitx5-src/src/lib"
+        CACHE PATH "fcitx5 src/lib directory (sparse checkout)")
+
+    # Stub export headers (fcitxcore_export.h, etc.) generated in this repo.
+    set(FCITX5_STUB_INCLUDE "${CMAKE_SOURCE_DIR}/cmake/include"
+        CACHE PATH "Stub export headers for fcitx5")
+
+    # Installed runtime libraries (from libfcitx5core7 / libfcitx5utils2).
+    # These are present even without the -dev package; we just need the
+    # unversioned symlinks (created via ldconfig or manual ln -s).
+    set(FCITX5_CORE_LIB "/usr/lib/x86_64-linux-gnu/libFcitx5Core.so"
+        CACHE FILEPATH "libFcitx5Core shared library")
+    set(FCITX5_UTILS_LIB "/usr/lib/x86_64-linux-gnu/libFcitx5Utils.so"
+        CACHE FILEPATH "libFcitx5Utils shared library")
+
+    add_library(Fcitx5::Core SHARED IMPORTED)
+    set_target_properties(Fcitx5::Core PROPERTIES
+        IMPORTED_LOCATION "${FCITX5_CORE_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FCITX5_SRC_INCLUDE};${FCITX5_STUB_INCLUDE}"
+    )
+
+    add_library(Fcitx5::Utils SHARED IMPORTED)
+    set_target_properties(Fcitx5::Utils PROPERTIES
+        IMPORTED_LOCATION "${FCITX5_UTILS_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FCITX5_SRC_INCLUDE};${FCITX5_STUB_INCLUDE}"
+    )
+endif()
+
+# ── Rust FFI library ──────────────────────────────────────────────────────────
 
 add_library(Mzkana::FFI SHARED IMPORTED)
 set_target_properties(Mzkana::FFI PROPERTIES
     IMPORTED_LOCATION "${MZKANA_RUST_TARGET}/libmzkana.so"
     INTERFACE_INCLUDE_DIRECTORIES "${MZKANA_FFI_INCLUDE}"
-)
-
-add_library(Fcitx5::Core SHARED IMPORTED)
-set_target_properties(Fcitx5::Core PROPERTIES
-    IMPORTED_LOCATION "${FCITX5_CORE_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${FCITX5_SRC_INCLUDE};${FCITX5_STUB_INCLUDE}"
-)
-
-add_library(Fcitx5::Utils SHARED IMPORTED)
-set_target_properties(Fcitx5::Utils PROPERTIES
-    IMPORTED_LOCATION "${FCITX5_UTILS_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${FCITX5_SRC_INCLUDE};${FCITX5_STUB_INCLUDE}"
 )
 
 # ── Addon module ──────────────────────────────────────────────────────────────
@@ -63,8 +91,6 @@ add_library(fcitx5-mzkana MODULE
 
 target_include_directories(fcitx5-mzkana PRIVATE
     ${MZKANA_FFI_INCLUDE}
-    ${FCITX5_SRC_INCLUDE}
-    ${FCITX5_STUB_INCLUDE}
 )
 
 target_compile_options(fcitx5-mzkana PRIVATE
