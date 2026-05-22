@@ -65,10 +65,7 @@ pub mod composition_mode {
 }
 
 /// Preedit.Segment.Annotation
-#[allow(dead_code)]
 pub mod annotation {
-    pub const NONE: u64 = 0;
-    pub const UNDERLINE: u64 = 1;
     pub const HIGHLIGHT: u64 = 2;
 }
 

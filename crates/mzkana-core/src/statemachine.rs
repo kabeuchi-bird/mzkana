@@ -70,8 +70,6 @@ pub enum OutputAction {
 struct TentativeChar {
     kana: String,
     source_keys: Vec<String>,
-    #[allow(dead_code)]
-    sent_at: Instant,
     /// Some(deadline) → chord rewrite window; None → sequence (permanent) or confirmed
     rewrite_deadline: Option<Instant>,
     /// Tokens after the leading kana that are emitted once this char is confirmed
@@ -116,8 +114,6 @@ pub struct StateMachine {
     tentative_buffer: Vec<TentativeChar>,
     modifier_states: Vec<ModifierState>,
     direct_trigger_state: DirectTriggerState,
-    /// Keys currently held for the direct trigger (for hold detection).
-    direct_trigger_held: bool,
     direct_trigger_interrupted: bool,
     mozc_mode: MozcMode,
     /// Chord timer: tracks the earliest rewrite_deadline in tentative_buffer.
@@ -147,7 +143,6 @@ impl StateMachine {
             tentative_buffer: Vec::new(),
             modifier_states,
             direct_trigger_state: DirectTriggerState::Inactive,
-            direct_trigger_held: false,
             direct_trigger_interrupted: false,
             mozc_mode: MozcMode::Composition,
             chord_deadline: None,
@@ -168,7 +163,6 @@ impl StateMachine {
             ms.toggled = false;
         }
         self.direct_trigger_state = DirectTriggerState::Inactive;
-        self.direct_trigger_held = false;
         self.direct_trigger_interrupted = false;
         self.held_keys.clear();
         actions
@@ -278,7 +272,6 @@ impl StateMachine {
             self.tentative_buffer.push(TentativeChar {
                 kana: mod_output,
                 source_keys: vec![key.to_string()],
-                sent_at: now,
                 rewrite_deadline: None,
                 pending_tail: Vec::new(),
             });
@@ -331,7 +324,7 @@ impl StateMachine {
                                 .map(|s| s.to_string())
                                 .collect();
                             let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-                            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
+                            return self.emit_sequence(&refs, vec![key.to_string()], None);
                         }
                     }
                     TapAction::Output => {
@@ -342,7 +335,7 @@ impl StateMachine {
                                 .map(|s| s.to_string())
                                 .collect();
                             let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-                            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
+                            return self.emit_sequence(&refs, vec![key.to_string()], None);
                         }
                     }
                     TapAction::None => {}
@@ -373,12 +366,7 @@ impl StateMachine {
         let has_prefix_continuation = self.has_prefix_continuation();
         let has_postfix_candidate = self.has_postfix_candidate(key);
 
-        // Determine base kana from shift state
-        let base_kana = if shift {
-            self.lookup_base_shifted(key)
-        } else {
-            self.lookup_base(key)
-        };
+        let base_kana = self.lookup_base(key);
 
         // Check if a prefix sequence already in pending resolves to a new rule
         if let Some(resolved) = self.try_resolve_pending() {
@@ -419,7 +407,7 @@ impl StateMachine {
         if tokens.first().is_some_and(|t| t.starts_with('!')) {
             self.pending_keys.clear();
             let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
+            return self.emit_sequence(&refs, vec![key.to_string()], None);
         }
 
         let needs_speculation =
@@ -429,7 +417,7 @@ impl StateMachine {
         if tokens.len() > 1 && !needs_speculation {
             self.pending_keys.clear();
             let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-            return self.emit_sequence(&refs, vec![key.to_string()], None, now);
+            return self.emit_sequence(&refs, vec![key.to_string()], None);
         }
 
         // Speculative emit of first kana; tail (if any) deferred until confirmed
@@ -466,7 +454,6 @@ impl StateMachine {
             self.tentative_buffer.push(TentativeChar {
                 kana,
                 source_keys: vec![key.to_string()],
-                sent_at: now,
                 rewrite_deadline: None,
                 pending_tail: Vec::new(),
             });
@@ -476,7 +463,6 @@ impl StateMachine {
         self.tentative_buffer.push(TentativeChar {
             kana,
             source_keys: vec![key.to_string()],
-            sent_at: now,
             rewrite_deadline,
             pending_tail,
         });
@@ -584,7 +570,7 @@ impl StateMachine {
             .map(|s| s.to_string())
             .collect();
         let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-        let seq_actions = self.emit_sequence(&token_refs, rule.source_keys, None, now);
+        let seq_actions = self.emit_sequence(&token_refs, rule.source_keys, None);
         actions.extend(seq_actions);
 
         self.pending_keys.clear();
@@ -663,7 +649,6 @@ impl StateMachine {
 
         match kind {
             TriggerKind::Hold => {
-                self.direct_trigger_held = true;
                 self.direct_trigger_interrupted = false;
                 self.direct_trigger_state = DirectTriggerState::Active;
                 // Clear pending/tentative on activation
@@ -705,7 +690,6 @@ impl StateMachine {
             .map(|dt| dt.tap_action)
             .unwrap_or(TapAction::Passthrough);
 
-        self.direct_trigger_held = false;
         let was_interrupted = self.direct_trigger_interrupted;
         self.direct_trigger_state = DirectTriggerState::Inactive;
         self.pending_keys.clear();
@@ -742,11 +726,6 @@ impl StateMachine {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn lookup_base(&self, key: &str) -> Option<String> {
-        self.layout.base_layer.get(key).cloned()
-    }
-
-    fn lookup_base_shifted(&self, key: &str) -> Option<String> {
-        // For now, shift layer is not separately defined; fall back to base
         self.layout.base_layer.get(key).cloned()
     }
 
@@ -820,7 +799,7 @@ impl StateMachine {
         let source_keys = chord.keys.clone();
         let tokens: Vec<String> = self.resolve_sequence(&output).iter().map(|s| s.to_string()).collect();
         let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-        let seq = self.emit_sequence(&refs, source_keys, None, now);
+        let seq = self.emit_sequence(&refs, source_keys, None);
         actions.extend(seq);
 
         self.update_chord_deadline();
@@ -912,8 +891,7 @@ impl StateMachine {
         &mut self,
         tokens: &[&str],
         source_keys: Vec<String>,
-        rewrite_deadline: Option<std::time::Instant>,
-        now: std::time::Instant,
+        rewrite_deadline: Option<Instant>,
     ) -> Vec<OutputAction> {
         let mut actions = Vec::new();
         for &token in tokens {
@@ -924,7 +902,6 @@ impl StateMachine {
                 self.tentative_buffer.push(TentativeChar {
                     kana: token.to_string(),
                     source_keys: source_keys.clone(),
-                    sent_at: now,
                     rewrite_deadline,
                     pending_tail: Vec::new(),
                 });
