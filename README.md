@@ -25,7 +25,7 @@ mzkana/
 │   └── mzkana-ffi/         # C ABI ラッパー（cbindgen で mzkana.h を生成）
 ├── fcitx5-addon/           # Fcitx5 C++ アドオン
 │   ├── src/engine.cpp/.h   # InputMethodEngineV2 実装
-│   ├── data/               # mzkana.conf / mzkana.desktop
+│   ├── data/               # mzkana.conf（アドオン登録）/ mzkana-im.conf（入力メソッド登録）
 │   └── cmake/include/      # スタブエクスポートヘッダ（-dev 不要ビルド用）
 ├── layouts/                # サンプル配列定義
 │   ├── tsuki-2-263.toml    # 月配列 2-263 式（前置シフト）

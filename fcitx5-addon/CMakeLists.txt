@@ -121,8 +121,9 @@ install(TARGETS fcitx5-mzkana
 install(FILES data/mzkana.conf
     DESTINATION "${FCITX5_DATA_DIR}/addon")
 
-install(FILES data/mzkana.desktop
-    DESTINATION "${FCITX5_DATA_DIR}/inputmethod")
+install(FILES data/mzkana-im.conf
+    DESTINATION "${FCITX5_DATA_DIR}/inputmethod"
+    RENAME mzkana.conf)
 
 install(FILES "${MZKANA_RUST_TARGET}/libmzkana.so"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}")
