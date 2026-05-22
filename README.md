@@ -100,6 +100,57 @@ cp layouts/naginata-v17.toml ~/.config/fcitx5/conf/mzkana/layout.toml
 
 `~/.config/fcitx5/conf/mzkana/layout.toml` を編集・保存すると、次のキーイベント時に自動的に再ロードされます（fcitx5 の再起動不要）。
 
+## fcitx5-configtool での設定
+
+インストール後、以下の手順で MzKana を有効にします。
+
+### 1. MzKana を入力メソッドリストに追加する
+
+```sh
+fcitx5-configtool
+```
+
+1. **「入力メソッド」タブ** を開く
+2. 右下の **「入力メソッドを追加」（`+`）** ボタンをクリック
+3. 検索ボックスに `mzkana` または `MzKana` と入力
+4. **「MzKana」** を選択して **「OK」**
+
+### 2. 入力メソッドを切り替える
+
+| 操作 | 方法 |
+|---|---|
+| MzKana へ切り替え | `Ctrl+Space`（デフォルト）または fcitx5 のトレイアイコンをクリック |
+| 前の入力メソッドへ戻る | 同キーをもう一度押すか、トレイから選択 |
+
+切り替えキーは fcitx5-configtool の **「グローバルオプション」→「ホットキー」** から変更できます。
+
+### 3. レイアウトファイルを選ぶ
+
+MzKana はレイアウトファイルを読み込むので、使用する配列を配置しておく必要があります。
+
+```sh
+mkdir -p ~/.config/fcitx5/conf/mzkana
+
+# 例: 薙刀式 v17
+cp layouts/naginata-v17.toml ~/.config/fcitx5/conf/mzkana/layout.toml
+
+# 例: 月配列 2-263
+cp layouts/tsuki-2-263.toml  ~/.config/fcitx5/conf/mzkana/layout.toml
+
+# 例: 新下駄配列
+cp layouts/shin-geta.toml    ~/.config/fcitx5/conf/mzkana/layout.toml
+```
+
+ファイルを保存すると次のキーイベント時に自動再ロードされます（fcitx5 の再起動不要）。
+
+### 4. アドオンの有効・無効を切り替える
+
+```sh
+fcitx5-configtool
+```
+
+**「アドオン」タブ** → `MzKana` の行でチェックボックスをオン／オフすることで、アドオン自体を有効化・無効化できます。
+
 ## CLI ツール
 
 ```sh
