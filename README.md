@@ -70,15 +70,19 @@ git clone --depth=1 --filter=blob:none --sparse \
     https://github.com/fcitx/fcitx5.git /tmp/fcitx5-src
 git -C /tmp/fcitx5-src sparse-checkout set src/lib
 
-# unversioned シンボリックリンクを作成
-sudo ln -sf /usr/lib/x86_64-linux-gnu/libFcitx5Core.so.7 \
-            /usr/lib/x86_64-linux-gnu/libFcitx5Core.so
-sudo ln -sf /usr/lib/x86_64-linux-gnu/libFcitx5Utils.so.2 \
-            /usr/lib/x86_64-linux-gnu/libFcitx5Utils.so
+# unversioned シンボリックリンクをビルドディレクトリ内に作成（sudo 不要・システム変更なし）
+mkdir -p build/fcitx5-link
+ln -sf "$(find /usr/lib -name 'libFcitx5Core.so.*' | grep -v '\.so\.[0-9]*\.' | head -1)" \
+       build/fcitx5-link/libFcitx5Core.so
+ln -sf "$(find /usr/lib -name 'libFcitx5Utils.so.*' | grep -v '\.so\.[0-9]*\.' | head -1)" \
+       build/fcitx5-link/libFcitx5Utils.so
 
 cargo build --release -p mzkana-ffi
 
-cmake -B build fcitx5-addon -DFCITX5_USE_SRC_HEADERS=ON
+cmake -B build fcitx5-addon \
+  -DFCITX5_USE_SRC_HEADERS=ON \
+  -DFCITX5_CORE_LIB="$PWD/build/fcitx5-link/libFcitx5Core.so" \
+  -DFCITX5_UTILS_LIB="$PWD/build/fcitx5-link/libFcitx5Utils.so"
 cmake --build build
 sudo cmake --install build
 ```
@@ -245,7 +249,7 @@ output   = "日"
 
 ## Fcitx5 アドオンのアーキテクチャ
 
-```
+```text
 キーイベント
     │
     ▼

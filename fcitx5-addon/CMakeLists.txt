@@ -15,10 +15,14 @@ set(MZKANA_RUST_TARGET "${CMAKE_SOURCE_DIR}/../target/release"
 set(MZKANA_FFI_INCLUDE "${CMAKE_SOURCE_DIR}/../crates/mzkana-ffi/include"
     CACHE PATH "Directory containing mzkana.h")
 
-# Install destinations – override if your fcitx5 is in a non-standard prefix
-set(FCITX5_ADDON_DIR "/usr/lib/x86_64-linux-gnu/fcitx5"
+# Resolve platform-correct install paths early so FCITX5_ADDON_DIR/FCITX5_DATA_DIR
+# can use them as defaults.
+include(GNUInstallDirs)
+
+# Install destinations – defaults derived from GNUInstallDirs (arch-aware)
+set(FCITX5_ADDON_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/fcitx5"
     CACHE PATH "fcitx5 addon install directory")
-set(FCITX5_DATA_DIR "/usr/share/fcitx5"
+set(FCITX5_DATA_DIR "${CMAKE_INSTALL_FULL_DATADIR}/fcitx5"
     CACHE PATH "fcitx5 data install directory")
 
 # ── fcitx5 header / library resolution ───────────────────────────────────────
@@ -110,8 +114,6 @@ set_target_properties(fcitx5-mzkana PROPERTIES
 )
 
 # ── Install ───────────────────────────────────────────────────────────────────
-
-include(GNUInstallDirs)
 
 install(TARGETS fcitx5-mzkana
     DESTINATION "${FCITX5_ADDON_DIR}")

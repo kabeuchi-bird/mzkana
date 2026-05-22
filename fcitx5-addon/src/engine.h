@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include "mzkana.h"
@@ -38,6 +39,7 @@ private:
     MzkanaEngine *engine_ = nullptr;
 
     std::string defaultConfigPath() const;
+    void tryInitEngine();
     void applyResult(fcitx::InputContext *ic, const MzkanaResult &result);
     void clearPreedit(fcitx::InputContext *ic);
 };

@@ -16,9 +16,14 @@ namespace mzkana {
 
 MzkanaFcitxEngine::MzkanaFcitxEngine(fcitx::Instance *instance)
     : instance_(instance) {
+    tryInitEngine();
+}
+
+void MzkanaFcitxEngine::tryInitEngine() {
+    if (engine_) return;
     engine_ = mzkana_engine_create(defaultConfigPath().c_str(), nullptr);
-    // engine_ may be null if the config file doesn't exist yet; keys pass
-    // through until the user creates a layout.toml.
+    // engine_ may still be null if the layout file doesn't exist yet; retry
+    // on the next keyEvent or activate call.
 }
 
 MzkanaFcitxEngine::~MzkanaFcitxEngine() {
@@ -40,6 +45,7 @@ std::vector<fcitx::InputMethodEntry> MzkanaFcitxEngine::listInputMethods() {
 
 void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
                                   fcitx::KeyEvent &keyEvent) {
+    tryInitEngine();
     if (!engine_) return;
 
     auto *ic = keyEvent.inputContext();
@@ -70,6 +76,7 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
              static_cast<unsigned>(FcitxKey_A)));
     }
     const std::string keyName = fcitx::Key::keySymToString(sym);
+    if (keyName.empty()) return;
 
     MzkanaResult result;
     if (keyEvent.isRelease()) {
@@ -90,7 +97,7 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
 
 void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
                                    fcitx::InputContextEvent & /*event*/) {
-    // Nothing extra needed; state machine starts clean.
+    tryInitEngine();
 }
 
 void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry &entry,

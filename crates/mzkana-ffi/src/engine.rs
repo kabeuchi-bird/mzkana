@@ -45,7 +45,9 @@ impl Engine {
         .map_err(|e| format!("notify watcher error: {e}"))?;
 
         if let Some(parent) = config_path.parent() {
-            let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
+            if let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive) {
+                tracing::warn!("hot-reload watch failed for {}: {e}", parent.display());
+            }
         }
 
         Ok(Self {
