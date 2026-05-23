@@ -108,9 +108,14 @@ target_link_libraries(fcitx5-mzkana PRIVATE
     Fcitx5::Utils
 )
 
-# Fcitx5 addon .so must be named without the "lib" prefix
+# Fcitx5 addon .so must be named without the "lib" prefix.
+# INSTALL_RPATH tells the dynamic linker where libmzkana.so lives after
+# installation so that the NEEDED entry (set by the SONAME in build.rs)
+# can be resolved without requiring ldconfig or LD_LIBRARY_PATH.
 set_target_properties(fcitx5-mzkana PROPERTIES
     PREFIX ""
+    INSTALL_RPATH "${CMAKE_INSTALL_FULL_LIBDIR}"
+    BUILD_WITH_INSTALL_RPATH TRUE
 )
 
 # ── Install ───────────────────────────────────────────────────────────────────

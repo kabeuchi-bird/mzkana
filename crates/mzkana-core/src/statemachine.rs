@@ -62,7 +62,18 @@ pub enum OutputAction {
     /// Send a function/control key (e.g. Return, Tab, Up) bypassing Mozc preedit.
     /// The string is the XKB keysym name as used in the layout file after the `!` prefix.
     SendFunctionKey(String),
+    /// Send a modifier+key combination via Mozc. If Mozc consumes it (e.g. S-!Left during
+    /// conversion adjusts segment boundaries), the preedit is updated. If Mozc does not
+    /// consume it, the key is forwarded to the application via forwardKey().
+    /// `mods` is a bitmask: MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_SUPER.
+    /// `key` is the XKB keysym name ("z", "Left", "Return", etc.).
+    SendModifiedKey { key: String, mods: u8 },
 }
+
+pub const MOD_SHIFT: u8 = 0x01;
+pub const MOD_CTRL:  u8 = 0x02;
+pub const MOD_ALT:   u8 = 0x04;
+pub const MOD_SUPER: u8 = 0x08;
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
@@ -403,8 +414,8 @@ impl StateMachine {
             .map(|s| s.to_string())
             .collect();
 
-        // A leading function-key token: emit entire sequence immediately (non-speculative)
-        if tokens.first().is_some_and(|t| t.starts_with('!')) {
+        // A leading function-key or modifier-key token: emit entire sequence immediately (non-speculative)
+        if tokens.first().is_some_and(|t| Self::is_immediate_action_token(t)) {
             self.pending_keys.clear();
             let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
             return self.emit_sequence(&refs, vec![key.to_string()], None);
@@ -605,11 +616,11 @@ impl StateMachine {
                     .map(|s| s.to_string())
                     .collect();
                 for token in tokens {
-                    if let Some(key_name) = token.strip_prefix('!') {
-                        actions.push(OutputAction::SendFunctionKey(key_name.to_string()));
+                    actions.push(if Self::is_immediate_action_token(&token) {
+                        Self::make_output_action(&token)
                     } else {
-                        actions.push(OutputAction::CommitDirect(token));
-                    }
+                        OutputAction::CommitDirect(token)
+                    });
                 }
                 return actions;
             }
@@ -861,9 +872,32 @@ impl StateMachine {
             .min();
     }
 
+    /// Returns true if this token should be emitted immediately (not deferred speculatively).
+    fn is_immediate_action_token(token: &str) -> bool {
+        token.starts_with('!')
+            || token.starts_with("S-")
+            || token.starts_with("C-")
+            || token.starts_with("A-")
+            || token.starts_with("M-")
+    }
+
     /// Convert an output string from the layout config into the appropriate OutputAction.
+    /// Strings starting with modifier prefixes (S-, C-, A-, M-) are SendModifiedKey.
     /// Strings starting with `!` are function keys (e.g. `!Return`, `!Tab`).
     fn make_output_action(output: &str) -> OutputAction {
+        let mut mods = 0u8;
+        let mut rest = output;
+        loop {
+            if      let Some(r) = rest.strip_prefix("S-") { mods |= MOD_SHIFT; rest = r; }
+            else if let Some(r) = rest.strip_prefix("C-") { mods |= MOD_CTRL;  rest = r; }
+            else if let Some(r) = rest.strip_prefix("A-") { mods |= MOD_ALT;   rest = r; }
+            else if let Some(r) = rest.strip_prefix("M-") { mods |= MOD_SUPER; rest = r; }
+            else { break; }
+        }
+        if mods != 0 {
+            let key = rest.strip_prefix('!').unwrap_or(rest).to_string();
+            return OutputAction::SendModifiedKey { key, mods };
+        }
         if let Some(key_name) = output.strip_prefix('!') {
             OutputAction::SendFunctionKey(key_name.to_string())
         } else {
@@ -896,9 +930,12 @@ impl StateMachine {
         let mut actions = Vec::new();
         for &token in tokens {
             let action = Self::make_output_action(token);
-            let is_fkey = matches!(action, OutputAction::SendFunctionKey(_));
+            let skip_tentative = matches!(
+                action,
+                OutputAction::SendFunctionKey(_) | OutputAction::SendModifiedKey { .. }
+            );
             actions.push(action);
-            if !is_fkey {
+            if !skip_tentative {
                 self.tentative_buffer.push(TentativeChar {
                     kana: token.to_string(),
                     source_keys: source_keys.clone(),

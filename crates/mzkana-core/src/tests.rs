@@ -1462,3 +1462,120 @@ mod codec_tests {
         assert!(out.preedit_has_highlight, "HIGHLIGHT segment should be detected");
     }
 }
+
+// ── Modifier key token tests ──────────────────────────────────────────────────
+
+fn modifier_key_layout(output: &str) -> String {
+    // Grid format: header `. 1` sets col_count=1.
+    // `. q` sets explicit_keys=["q"] for subsequent data rows.
+    // `1 <output>` maps key "q" to the given output.
+    format!(
+        r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. 1
+. q
+1 {output}
+"""
+"#,
+        output = output
+    )
+}
+
+#[test]
+fn modified_key_ctrl_z() {
+    let toml = modifier_key_layout("C-z");
+    let mut m = sm(&toml);
+    let actions = press_seq(&mut m, &["q"]);
+    assert!(
+        actions.contains(&OutputAction::SendModifiedKey {
+            key: "z".to_string(),
+            mods: MOD_CTRL,
+        }),
+        "expected SendModifiedKey for C-z, got {actions:?}"
+    );
+}
+
+#[test]
+fn modified_key_shift_up() {
+    let toml = modifier_key_layout("S-!Up");
+    let mut m = sm(&toml);
+    let actions = press_seq(&mut m, &["q"]);
+    assert!(
+        actions.contains(&OutputAction::SendModifiedKey {
+            key: "Up".to_string(),
+            mods: MOD_SHIFT,
+        }),
+        "expected SendModifiedKey for S-!Up, got {actions:?}"
+    );
+}
+
+#[test]
+fn modified_key_shift_ctrl_s() {
+    let toml = modifier_key_layout("S-C-s");
+    let mut m = sm(&toml);
+    let actions = press_seq(&mut m, &["q"]);
+    assert!(
+        actions.contains(&OutputAction::SendModifiedKey {
+            key: "s".to_string(),
+            mods: MOD_SHIFT | MOD_CTRL,
+        }),
+        "expected SendModifiedKey for S-C-s, got {actions:?}"
+    );
+}
+
+#[test]
+fn modified_key_not_in_tentative() {
+    let toml = modifier_key_layout("C-z");
+    let mut m = sm(&toml);
+    press_seq(&mut m, &["q"]);
+    assert!(
+        m.tentative_kana_string().is_empty(),
+        "modifier key output must not enter the tentative buffer"
+    );
+}
+
+#[test]
+fn modified_key_invalid_function_key_rejected() {
+    let toml = modifier_key_layout("C-!BadKey");
+    assert!(
+        load_layout(&toml).is_err(),
+        "layout with unknown function key after modifier prefix must fail to load"
+    );
+}
+
+#[test]
+fn modified_key_in_alias() {
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. 1
+. q
+1 save
+"""
+
+[[alias]]
+save = "S-C-s"
+"#;
+    let mut m = sm(toml);
+    let actions = press_seq(&mut m, &["q"]);
+    assert!(
+        actions.contains(&OutputAction::SendModifiedKey {
+            key: "s".to_string(),
+            mods: MOD_SHIFT | MOD_CTRL,
+        }),
+        "alias containing modifier key token must expand correctly, got {actions:?}"
+    );
+}

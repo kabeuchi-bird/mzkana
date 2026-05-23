@@ -40,6 +40,14 @@ pub struct MzkanaResult {
     /// If `consumed == 0`, the key name to pass through (may be empty).
     pub passthrough_key: [u8; 64],
     pub passthrough_key_len: u32,
+
+    /// XKB keysym name of a key to forward to the application with modifier synthesis.
+    /// Non-empty only when a modifier+key token was not consumed by Mozc.
+    /// The C++ layer should call ic->forwardKey() with this key and `forward_modifiers`.
+    pub forward_key: [u8; 64],
+    pub forward_key_len: u32,
+    /// Modifier bitmask for `forward_key`: bit0=Shift, bit1=Ctrl, bit2=Alt, bit3=Super.
+    pub forward_modifiers: u8,
 }
 
 impl Default for MzkanaResult {
@@ -52,6 +60,9 @@ impl Default for MzkanaResult {
             commit_len: 0,
             passthrough_key: [0u8; 64],
             passthrough_key_len: 0,
+            forward_key: [0u8; 64],
+            forward_key_len: 0,
+            forward_modifiers: 0,
         }
     }
 }
@@ -77,6 +88,10 @@ fn result_from(out: engine::ProcessResult) -> MzkanaResult {
     }
     if let Some(ref p) = out.passthrough_key {
         r.passthrough_key_len = fill_buf(&mut r.passthrough_key, p);
+    }
+    if let Some(ref fk) = out.forward_key {
+        r.forward_key_len = fill_buf(&mut r.forward_key, fk);
+        r.forward_modifiers = out.forward_mods;
     }
     r
 }

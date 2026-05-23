@@ -46,6 +46,14 @@ pub mod special_key {
     pub const INSERT: u64 = 33;
 }
 
+/// KeyEvent.ModifierKey (field 4, repeated varint)
+pub mod modifier_key {
+    pub const SHIFT: u64 = 1;
+    pub const CTRL:  u64 = 3;
+    pub const ALT:   u64 = 4;
+    // Super/Meta does not exist in Mozc's ModifierKey enum
+}
+
 /// KeyEvent.InputStyle
 pub mod input_style {
     /// Key value follows current input mode.
@@ -114,6 +122,39 @@ pub fn input_send_special(session_id: u64, special: u64) -> EncodedInput {
     let mut key = Vec::new();
     write_varint_field(&mut key, 3, special);                // special_key = 3
     write_varint_field(&mut key, 6, input_style::FOLLOW_MODE); // input_style = 6
+
+    let mut buf = Vec::new();
+    write_varint_field(&mut buf, 1, cmd::SEND_KEY);
+    write_varint_field(&mut buf, 2, session_id);
+    write_len_field(&mut buf, 3, &key);
+    EncodedInput(buf)
+}
+
+/// Build a SEND_KEY input with a special key and modifier flags (e.g. S-!Left).
+/// `mods` uses the same bitmask as `OutputAction::SendModifiedKey`.
+pub fn input_send_special_with_mods(session_id: u64, special: u64, mods: u8) -> EncodedInput {
+    let mut key = Vec::new();
+    write_varint_field(&mut key, 3, special);                    // special_key = 3
+    write_varint_field(&mut key, 6, input_style::FOLLOW_MODE);   // input_style = 6
+    if mods & 0x01 != 0 { write_varint_field(&mut key, 4, modifier_key::SHIFT); }
+    if mods & 0x02 != 0 { write_varint_field(&mut key, 4, modifier_key::CTRL); }
+    if mods & 0x04 != 0 { write_varint_field(&mut key, 4, modifier_key::ALT); }
+
+    let mut buf = Vec::new();
+    write_varint_field(&mut buf, 1, cmd::SEND_KEY);
+    write_varint_field(&mut buf, 2, session_id);
+    write_len_field(&mut buf, 3, &key);
+    EncodedInput(buf)
+}
+
+/// Build a SEND_KEY input with a key_code (ASCII) and modifier flags (e.g. C-z).
+/// `key_code` is the ASCII code of the character (e.g. b'z' = 122).
+pub fn input_send_key_code_with_mods(session_id: u64, key_code: u32, mods: u8) -> EncodedInput {
+    let mut key = Vec::new();
+    write_varint_field(&mut key, 1, key_code as u64);            // key_code = 1
+    if mods & 0x01 != 0 { write_varint_field(&mut key, 4, modifier_key::SHIFT); }
+    if mods & 0x02 != 0 { write_varint_field(&mut key, 4, modifier_key::CTRL); }
+    if mods & 0x04 != 0 { write_varint_field(&mut key, 4, modifier_key::ALT); }
 
     let mut buf = Vec::new();
     write_varint_field(&mut buf, 1, cmd::SEND_KEY);

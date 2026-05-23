@@ -570,7 +570,16 @@ impl Layout {
             .flat_map(|s| s.split_whitespace())
             .chain(alias_tokens)
         {
-            if let Some(key_name) = token.strip_prefix('!') {
+            // Strip modifier prefixes (S-, C-, A-, M-) before validation
+            let mut rest = token;
+            loop {
+                if      let Some(r) = rest.strip_prefix("S-") { rest = r; }
+                else if let Some(r) = rest.strip_prefix("C-") { rest = r; }
+                else if let Some(r) = rest.strip_prefix("A-") { rest = r; }
+                else if let Some(r) = rest.strip_prefix("M-") { rest = r; }
+                else { break; }
+            }
+            if let Some(key_name) = rest.strip_prefix('!') {
                 if !VALID_FUNCTION_KEYS.contains(key_name) {
                     return Err(ConfigError::GridParse(format!(
                         "unknown function key '!{key_name}'; \

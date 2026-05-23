@@ -124,11 +124,15 @@ impl Engine {
                 preedit: self.preedit.clone(),
                 commit: None,
                 passthrough_key: None,
+                forward_key: None,
+                forward_mods: 0,
             };
         }
 
         let mut commit: Option<String> = None;
         let mut passthrough_key: Option<String> = None;
+        let mut forward_key: Option<String> = None;
+        let mut forward_mods: u8 = 0;
         let mut any_consumed = false;
 
         for action in &actions {
@@ -154,6 +158,22 @@ impl Engine {
                     }
                     any_consumed = true;
                 }
+                OutputAction::SendModifiedKey { key, mods } => {
+                    let mozc_consumed = self.mozc.as_mut()
+                        .and_then(|mozc| mozc.send_modified_key(key, *mods).ok())
+                        .map(|out| {
+                            let consumed = out.consumed;
+                            self.apply_mozc_output(out, &mut commit);
+                            consumed
+                        })
+                        .unwrap_or(false);
+
+                    if !mozc_consumed {
+                        forward_key = Some(key.clone());
+                        forward_mods = *mods;
+                    }
+                    any_consumed = true;
+                }
                 _ => {
                     if let Some(out) = self.dispatch_to_mozc(action) {
                         self.apply_mozc_output(out, &mut commit);
@@ -164,7 +184,7 @@ impl Engine {
         }
 
         let consumed = any_consumed || passthrough_key.is_none();
-        ProcessResult { consumed, preedit: self.preedit.clone(), commit, passthrough_key }
+        ProcessResult { consumed, preedit: self.preedit.clone(), commit, passthrough_key, forward_key, forward_mods }
     }
 
     fn dispatch_to_mozc(&mut self, action: &OutputAction) -> Option<MozcOutput> {
@@ -199,4 +219,8 @@ pub struct ProcessResult {
     pub preedit: String,
     pub commit: Option<String>,
     pub passthrough_key: Option<String>,
+    /// Set when a modifier+key token was not consumed by Mozc; the C++ layer should
+    /// call ic->forwardKey() with this key name and the modifier bitmask.
+    pub forward_key: Option<String>,
+    pub forward_mods: u8,
 }

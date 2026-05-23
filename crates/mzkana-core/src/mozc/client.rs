@@ -6,8 +6,8 @@ use std::time::Duration;
 use super::codec::DecodeError;
 use super::proto::{
     decode_response, encode_command, input_create_session, input_delete_session,
-    input_revert, input_send_kana, input_send_special, input_submit,
-    special_key, DecodedOutput,
+    input_revert, input_send_kana, input_send_key_code_with_mods, input_send_special,
+    input_send_special_with_mods, input_submit, special_key, DecodedOutput,
 };
 use super::MozcOutput;
 
@@ -155,6 +155,23 @@ impl MozcClient {
         let code = xkb_name_to_mozc_special(name)
             .ok_or_else(|| MozcError::Protocol(format!("no Mozc SpecialKey for: {name}")))?;
         self.send_special_key(code)
+    }
+
+    /// Send a modifier+key combination to Mozc.
+    ///
+    /// - Function keys (e.g. `"Left"`, `"Return"`): sent as `special_key` + `modifier_keys`.
+    /// - Single ASCII characters (e.g. `"z"`, `"s"`): sent as `key_code` + `modifier_keys`.
+    /// - Anything else: returns `Err(Protocol)` — caller should forward to the application.
+    pub fn send_modified_key(&mut self, key: &str, mods: u8) -> Result<MozcOutput, MozcError> {
+        let sid = self.sid()?;
+        if let Some(special) = xkb_name_to_mozc_special(key) {
+            self.dispatch(&input_send_special_with_mods(sid, special, mods))
+        } else if key.len() == 1 && key.is_ascii() {
+            let code = key.as_bytes()[0] as u32;
+            self.dispatch(&input_send_key_code_with_mods(sid, code, mods))
+        } else {
+            Err(MozcError::Protocol(format!("no Mozc encoding for key: {key}")))
+        }
     }
 }
 
