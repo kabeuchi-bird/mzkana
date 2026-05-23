@@ -244,38 +244,42 @@ fn print_action(action: &OutputAction) {
 /// (from /proc/net/unix) against /proc/*/fd/ symlinks.
 #[cfg(target_os = "linux")]
 fn find_socket_owner(socket_name: &str) -> Option<(u32, String)> {
-    // Parse /proc/net/unix to find the inode for this socket name
+    // Parse /proc/net/unix to find the inode for this socket name.
+    // Also print the raw line for debugging.
     let unix_data = std::fs::read_to_string("/proc/net/unix").ok()?;
-    let target_inode: u64 = unix_data.lines().find_map(|line| {
+    let (target_inode, raw_line) = unix_data.lines().find_map(|line| {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if cols.len() >= 8 && cols.last() == Some(&socket_name) {
-            cols[6].parse().ok()
+            let inode: u64 = cols[6].parse().unwrap_or(0);
+            Some((inode, line.to_string()))
         } else {
             None
         }
     })?;
+    println!("    [/proc/net/unix] {raw_line}");
     if target_inode == 0 {
+        println!("    → inode=0: 権限不足または LISTENING 状態のソケット");
         return None;
     }
+    println!("    → inode={target_inode} でプロセス検索中...");
 
-    // Walk /proc/*/fd/ to find which process has an fd pointing to this inode
-    let proc_dir = std::fs::read_dir("/proc").ok()?;
+    // Walk /proc/*/fd/ — note: non-numeric entries (self, thread-self…) must be skipped,
+    // so use `continue` instead of `?` to avoid aborting the whole search.
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else { return None };
     for entry in proc_dir.flatten() {
-        let pid_str = entry.file_name();
-        let pid: u32 = pid_str.to_string_lossy().parse().ok()?;
+        let name = entry.file_name();
+        let Ok(pid) = name.to_string_lossy().parse::<u32>() else { continue };
         let fd_dir = format!("/proc/{pid}/fd");
         let Ok(fds) = std::fs::read_dir(&fd_dir) else { continue };
         for fd_entry in fds.flatten() {
-            if let Ok(target) = std::fs::read_link(fd_entry.path()) {
-                let t = target.to_string_lossy();
-                // Socket symlinks look like "socket:[inode]"
-                if t == format!("socket:[{target_inode}]") {
-                    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string();
-                    return Some((pid, comm));
-                }
+            let Ok(target) = std::fs::read_link(fd_entry.path()) else { continue };
+            // Socket symlinks look like "socket:[inode]"
+            if target.to_string_lossy() == format!("socket:[{target_inode}]") {
+                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                return Some((pid, comm));
             }
         }
     }
