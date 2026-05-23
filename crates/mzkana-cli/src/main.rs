@@ -294,7 +294,7 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
 
     // 4. Send CREATE_SESSION and show raw bytes
     // Command { input { type: CREATE_SESSION(1) } }
-    // Encoded: [0a 02 08 01]  frame: [size_t LE len][proto bytes]
+    // Encoded: [0a 02 08 01]  frame: [size_t NE len][proto bytes]
     let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x01];
     let len_prefix = proto.len().to_ne_bytes();
     let mut frame = Vec::with_capacity(len_prefix.len() + proto.len());

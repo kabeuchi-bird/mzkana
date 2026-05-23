@@ -108,7 +108,9 @@ impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::D
 
 /// Blocking Mozc IPC client over a Unix domain socket.
 ///
-/// Wire framing: `uint32_le(length) | proto_bytes` in both directions.
+/// Wire framing: `usize::to_ne_bytes(length) | proto_bytes` in both directions.
+/// The length prefix is `sizeof(size_t)` bytes in native byte order, matching
+/// Mozc's C++ IPC protocol (`size_t buf_size` passed to `SendMSG`/`RecvMSG`).
 pub struct MozcClient {
     stream: UnixStream,
     session_id: Option<u64>,
