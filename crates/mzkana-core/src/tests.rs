@@ -70,12 +70,12 @@ fn yen_key_mapping() {
 #[test]
 fn grid_row_mapping() {
     let l = load_layout(TSUKI).unwrap();
-    // Row 1 (q..p): q → 。
-    assert_eq!(l.base_layer.get("q").map(|s| s.as_str()), Some("。"));
-    // Row 2 (a..;): a → う
-    assert_eq!(l.base_layer.get("a").map(|s| s.as_str()), Some("う"));
-    // Row 2: s → し
-    assert_eq!(l.base_layer.get("s").map(|s| s.as_str()), Some("し"));
+    // Row 1 (q..p): q → そ
+    assert_eq!(l.base_layer.get("q").map(|s| s.as_str()), Some("そ"));
+    // Row 2 (a..;): a → は
+    assert_eq!(l.base_layer.get("a").map(|s| s.as_str()), Some("は"));
+    // Row 2: s → か
+    assert_eq!(l.base_layer.get("s").map(|s| s.as_str()), Some("か"));
 }
 
 #[test]
@@ -184,15 +184,15 @@ grid     = """
 fn single_key_base_layer() {
     let mut m = sm(TSUKI);
     let actions = press_seq(&mut m, &["q"]);
-    assert_eq!(actions, vec![OutputAction::SendKana("。".to_string())]);
-    assert_eq!(m.tentative_kana_string(), "。");
+    assert_eq!(actions, vec![OutputAction::SendKana("そ".to_string())]);
+    assert_eq!(m.tentative_kana_string(), "そ");
 }
 
 #[test]
 fn single_key_home_row() {
     let mut m = sm(TSUKI);
     let actions = press_seq(&mut m, &["a"]);
-    assert!(actions.contains(&OutputAction::SendKana("う".to_string())));
+    assert!(actions.contains(&OutputAction::SendKana("は".to_string())));
 }
 
 // ── Prefix shift (月配列) ─────────────────────────────────────────────────────
@@ -200,20 +200,20 @@ fn single_key_home_row() {
 #[test]
 fn prefix_shift_resolves() {
     let mut m = sm(TSUKI);
-    // d (base=て) then w: prefix_d grid row1 col w → え
+    // d (base=＜) then w: prefix_d grid row1 col w → ひ
     let actions = press_seq(&mut m, &["d", "w"]);
-    // Should contain: send_kana(て), backspace, send_kana(え)
+    // Should contain: send_kana(＜), backspace, send_kana(ひ)
     assert!(actions.contains(&OutputAction::Backspace));
     // After resolution preedit should be just the resolved kana
-    assert_ne!(m.tentative_kana_string(), "て");
+    assert_ne!(m.tentative_kana_string(), "＜");
 }
 
 #[test]
 fn prefix_trigger_alone_stays_base() {
     let mut m = sm(TSUKI);
-    // d alone: speculative sends "て", no prefix resolved
+    // d alone: speculative sends base output "＜", no prefix resolved
     let actions = press_seq(&mut m, &["d"]);
-    assert!(actions.contains(&OutputAction::SendKana("て".to_string())));
+    assert!(actions.contains(&OutputAction::SendKana("＜".to_string())));
 }
 
 // ── Chord (新下駄) ────────────────────────────────────────────────────────────
@@ -372,12 +372,12 @@ fn kanchoku_invalid_sequence_discarded() {
 fn backspace_pops_tentative() {
     let mut m = sm(TSUKI);
     let now = Instant::now();
-    m.process(InputEvent::down("q"), now); // 。
-    m.process(InputEvent::down("w"), now); // か
-    assert_eq!(m.tentative_kana_string(), "。か");
+    m.process(InputEvent::down("q"), now); // そ
+    m.process(InputEvent::down("w"), now); // こ
+    assert_eq!(m.tentative_kana_string(), "そこ");
     let bs = m.process(InputEvent::down("bs"), now);
     assert!(bs.contains(&OutputAction::Backspace));
-    assert_eq!(m.tentative_kana_string(), "。");
+    assert_eq!(m.tentative_kana_string(), "そ");
 }
 
 // ── Center-shift modifier (薙刀式) ────────────────────────────────────────────
