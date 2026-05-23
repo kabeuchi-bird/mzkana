@@ -3,6 +3,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::io::FromRawFd;
+
 use super::codec::DecodeError;
 use super::proto::{
     decode_response, encode_command, input_create_session, input_delete_session,
@@ -14,10 +17,60 @@ use super::MozcOutput;
 /// Maximum accepted response frame size (1 MiB).
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
-/// Default path to the Mozc server socket.
+/// Default path to the Mozc server socket (filesystem fallback).
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     PathBuf::from(home).join(".mozc").join("session.sock")
+}
+
+/// On Linux, Mozc uses an abstract namespace Unix socket whose name appears in
+/// /proc/net/unix as `@tmp/.mozc.{hash}.session`.  This function discovers the
+/// name and returns a connected `UnixStream`, or an error if not found.
+#[cfg(target_os = "linux")]
+fn connect_mozc_abstract() -> io::Result<UnixStream> {
+    let unix_data = std::fs::read_to_string("/proc/net/unix")?;
+    let abs_name = unix_data
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .find(|n| n.starts_with('@') && n.contains(".mozc.") && n.ends_with(".session"))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Mozc abstract socket not found in /proc/net/unix")
+        })?
+        .to_string();
+
+    // Strip the '@' sentinel to get the actual abstract name bytes.
+    let name = &abs_name[1..];
+    let name_bytes = name.as_bytes();
+    if name_bytes.len() > 107 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "abstract socket name too long"));
+    }
+
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as _;
+        // Abstract socket: sun_path[0] = '\0', followed by the name.
+        let dst = addr.sun_path.as_mut_ptr() as *mut u8;
+        // dst[0] is already 0 (zeroed); write name bytes starting at offset 1.
+        std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(1), name_bytes.len());
+
+        let path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
+        let addr_len = (path_offset + 1 + name_bytes.len()) as libc::socklen_t;
+
+        let ret = libc::connect(fd, &addr as *const _ as *const libc::sockaddr, addr_len);
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            libc::close(fd);
+            return Err(err);
+        }
+
+        tracing::debug!("connected to Mozc abstract socket: {abs_name}");
+        Ok(UnixStream::from_raw_fd(fd))
+    }
 }
 
 #[derive(Debug)]
@@ -53,11 +106,24 @@ pub struct MozcClient {
 
 impl MozcClient {
     /// Connect to the Mozc server socket and create a session.
+    ///
+    /// If `socket_path` is given it is used directly (filesystem socket).
+    /// Otherwise, on Linux the abstract namespace socket is discovered from
+    /// `/proc/net/unix` first; if that fails, the filesystem fallback path is tried.
     pub fn connect(socket_path: Option<&Path>) -> Result<Self, MozcError> {
-        let path = socket_path
-            .map(Path::to_path_buf)
-            .unwrap_or_else(default_socket_path);
-        let stream = UnixStream::connect(&path)?;
+        let stream = if let Some(path) = socket_path {
+            UnixStream::connect(path)?
+        } else {
+            #[cfg(target_os = "linux")]
+            let stream = connect_mozc_abstract()
+                .or_else(|e| {
+                    tracing::debug!("abstract socket discovery failed ({e}), trying filesystem path");
+                    UnixStream::connect(default_socket_path())
+                })?;
+            #[cfg(not(target_os = "linux"))]
+            let stream = UnixStream::connect(default_socket_path())?;
+            stream
+        };
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut client = Self { stream, session_id: None };
