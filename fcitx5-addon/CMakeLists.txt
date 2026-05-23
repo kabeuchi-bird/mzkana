@@ -19,10 +19,28 @@ set(MZKANA_FFI_INCLUDE "${CMAKE_SOURCE_DIR}/../crates/mzkana-ffi/include"
 # can use them as defaults.
 include(GNUInstallDirs)
 
-# Install destinations – defaults derived from GNUInstallDirs (arch-aware)
-set(FCITX5_ADDON_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/fcitx5"
+# Auto-detect the fcitx5 addon directory from the installed libFcitx5Core location.
+# This avoids requiring -DCMAKE_INSTALL_PREFIX=/usr when the system fcitx5 is under /usr.
+find_library(_fcitx5_core_lib NAMES Fcitx5Core)
+if(_fcitx5_core_lib)
+    get_filename_component(_fcitx5_lib_dir "${_fcitx5_core_lib}" DIRECTORY)
+    set(_fcitx5_addon_default "${_fcitx5_lib_dir}/fcitx5")
+    # Derive data dir: walk up from lib dir to prefix, then append share/fcitx5.
+    # e.g. /usr/lib/x86_64-linux-gnu → /usr → /usr/share/fcitx5
+    get_filename_component(_fcitx5_prefix "${_fcitx5_lib_dir}" DIRECTORY)
+    if("${_fcitx5_prefix}" MATCHES "/lib$")
+        get_filename_component(_fcitx5_prefix "${_fcitx5_prefix}" DIRECTORY)
+    endif()
+    set(_fcitx5_data_default "${_fcitx5_prefix}/share/fcitx5")
+else()
+    set(_fcitx5_addon_default "${CMAKE_INSTALL_FULL_LIBDIR}/fcitx5")
+    set(_fcitx5_data_default "${CMAKE_INSTALL_FULL_DATADIR}/fcitx5")
+endif()
+
+# Install destinations (override with -DFCITX5_ADDON_DIR=... if needed)
+set(FCITX5_ADDON_DIR "${_fcitx5_addon_default}"
     CACHE PATH "fcitx5 addon install directory")
-set(FCITX5_DATA_DIR "${CMAKE_INSTALL_FULL_DATADIR}/fcitx5"
+set(FCITX5_DATA_DIR "${_fcitx5_data_default}"
     CACHE PATH "fcitx5 data install directory")
 
 # ── fcitx5 header / library resolution ───────────────────────────────────────
