@@ -108,7 +108,9 @@ impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::D
 
 /// Blocking Mozc IPC client over a Unix domain socket.
 ///
-/// Wire framing: `uint32_le(length) | proto_bytes` in both directions.
+/// Wire framing: `usize::to_ne_bytes(length) | proto_bytes` in both directions.
+/// The length prefix is `sizeof(size_t)` bytes in native byte order, matching
+/// Mozc's C++ IPC protocol (`size_t buf_size` passed to `SendMSG`/`RecvMSG`).
 pub struct MozcClient {
     stream: UnixStream,
     session_id: Option<u64>,
@@ -148,16 +150,17 @@ impl MozcClient {
 
     fn send_recv(&mut self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let cmd_bytes = encode_command(input);
-        // Prepend length into a single buffer to issue one write syscall instead of two.
-        // UnixStream has no userspace write buffer, so no flush is needed.
-        let mut frame = Vec::with_capacity(4 + cmd_bytes.len());
-        frame.extend_from_slice(&(cmd_bytes.len() as u32).to_le_bytes());
+        // Mozc IPC framing: size_t (native endian) length prefix + proto bytes.
+        // On 64-bit Linux, size_t = 8 bytes; using usize matches sizeof(size_t).
+        let len_prefix = cmd_bytes.len().to_ne_bytes();
+        let mut frame = Vec::with_capacity(len_prefix.len() + cmd_bytes.len());
+        frame.extend_from_slice(&len_prefix);
         frame.extend_from_slice(&cmd_bytes);
         self.stream.write_all(&frame)?;
 
-        let mut len_buf = [0u8; 4];
+        let mut len_buf = [0u8; std::mem::size_of::<usize>()];
         self.stream.read_exact(&mut len_buf)?;
-        let resp_len = u32::from_le_bytes(len_buf) as usize;
+        let resp_len = usize::from_ne_bytes(len_buf);
         if resp_len > MAX_FRAME_SIZE {
             return Err(MozcError::Protocol(format!(
                 "response frame too large: {resp_len} > {MAX_FRAME_SIZE}"

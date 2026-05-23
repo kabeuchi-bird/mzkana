@@ -294,10 +294,11 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
 
     // 4. Send CREATE_SESSION and show raw bytes
     // Command { input { type: CREATE_SESSION(1) } }
-    // Encoded: [0a 02 08 01]  frame: [04 00 00 00 0a 02 08 01]
+    // Encoded: [0a 02 08 01]  frame: [size_t NE len][proto bytes]
     let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x01];
-    let mut frame = Vec::with_capacity(4 + proto.len());
-    frame.extend_from_slice(&(proto.len() as u32).to_le_bytes());
+    let len_prefix = proto.len().to_ne_bytes();
+    let mut frame = Vec::with_capacity(len_prefix.len() + proto.len());
+    frame.extend_from_slice(&len_prefix);
     frame.extend_from_slice(proto);
     println!("[4] CREATE_SESSION 送信: {:02x?}", frame);
     match stream.write_all(&frame) {
@@ -305,16 +306,13 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         Err(e) => { println!("    → 送信失敗: {e}"); return; }
     }
 
-    // 5. Read response length
-    println!("[5] レスポンス長 (4バイト) 読み取り...");
-    let mut len_buf = [0u8; 4];
+    // 5. Read response length (size_t = 8 bytes on 64-bit)
+    println!("[5] レスポンス長 ({}バイト) 読み取り...", std::mem::size_of::<usize>());
+    let mut len_buf = [0u8; std::mem::size_of::<usize>()];
     match stream.read_exact(&mut len_buf) {
         Ok(()) => {
-            let resp_len = u32::from_le_bytes(len_buf) as usize;
+            let resp_len = usize::from_ne_bytes(len_buf);
             println!("    → 長さバイト: {:02x?} → {resp_len} バイト", len_buf);
-            // Try big-endian too for diagnosis
-            let resp_len_be = u32::from_be_bytes(len_buf) as usize;
-            println!("    → big-endian 解釈だと: {resp_len_be} バイト");
 
             // 6. Read response body
             if resp_len < 65536 {
