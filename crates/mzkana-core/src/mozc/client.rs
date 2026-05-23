@@ -68,10 +68,24 @@ fn connect_mozc_abstract() -> io::Result<UnixStream> {
             return Err(err);
         }
 
-        tracing::debug!("connected to Mozc abstract socket: {abs_name}");
+        tracing::info!("connected to Mozc abstract socket: {abs_name}");
         Ok(UnixStream::from_raw_fd(fd))
     }
 }
+
+/// Return the abstract socket name found in /proc/net/unix, or None.
+/// Used by diagnostic tooling.
+#[cfg(target_os = "linux")]
+pub fn find_abstract_socket_name() -> Option<String> {
+    let unix_data = std::fs::read_to_string("/proc/net/unix").ok()?;
+    unix_data
+        .lines()
+        .filter_map(|l| l.split_whitespace().last().map(str::to_string))
+        .find(|n| n.starts_with('@') && n.contains(".mozc.") && n.ends_with(".session"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn find_abstract_socket_name() -> Option<String> { None }
 
 #[derive(Debug)]
 pub enum MozcError {

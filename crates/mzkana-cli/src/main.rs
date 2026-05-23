@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use mzkana_core::{load_layout, InputEvent, Layout, MozcClient, MozcOutput, OutputAction, StateMachine};
+use mzkana_core::{load_layout, mozc::find_abstract_socket_name, InputEvent, Layout, MozcClient, MozcOutput, OutputAction, StateMachine};
 
 #[derive(Parser)]
 #[command(name = "mzkana", about = "MzKana layout tool")]
@@ -41,6 +41,12 @@ enum Command {
     },
     /// Print the JSON Schema for the layout file format
     Schema,
+    /// Diagnose the Mozc IPC connection (socket discovery, raw byte exchange)
+    DiagnoseMozc {
+        /// Path to the Mozc server socket (overrides auto-discovery)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -57,6 +63,7 @@ fn main() {
         Command::Run { layout, keys } => cmd_run(&layout, &keys),
         Command::MozcRun { layout, keys, socket } => cmd_mozc_run(&layout, &keys, socket.as_deref()),
         Command::Schema => cmd_schema(),
+        Command::DiagnoseMozc { socket } => cmd_diagnose_mozc(socket.as_deref()),
     }
 }
 
@@ -230,6 +237,121 @@ fn print_action(action: &OutputAction) {
         OutputAction::MozcSubmit         => println!("mozc_submit"),
         OutputAction::SendFunctionKey(k) => println!("send_function_key({k})"),
         OutputAction::SendModifiedKey { key, mods } => println!("modified_key(mods={mods:#04b}, key={key})"),
+    }
+}
+
+fn cmd_diagnose_mozc(socket: Option<&Path>) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    // 1. Show socket discovery result
+    println!("=== Mozc IPC診断 ===");
+    match find_abstract_socket_name() {
+        Some(ref name) => println!("[1] abstract socket 発見: {name}"),
+        None => println!("[1] abstract socket 未発見 (/proc/net/unix に .mozc. エントリなし)"),
+    }
+    println!("    fallback パス: {}", mzkana_core::mozc::default_socket_path().display());
+
+    // 2. Attempt raw connection
+    let stream_result: std::io::Result<UnixStream> = if let Some(p) = socket {
+        println!("[2] 指定パスで接続試行: {}", p.display());
+        UnixStream::connect(p)
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref abs) = find_abstract_socket_name() {
+                let name = &abs[1..]; // strip '@'
+                println!("[2] abstract socket に接続試行: {abs}");
+                unsafe {
+                    use std::os::unix::io::FromRawFd;
+                    let name_bytes = name.as_bytes();
+                    let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+                    let mut addr: libc::sockaddr_un = std::mem::zeroed();
+                    addr.sun_family = libc::AF_UNIX as _;
+                    let dst = addr.sun_path.as_mut_ptr() as *mut u8;
+                    std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(1), name_bytes.len());
+                    let path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
+                    let addr_len = (path_offset + 1 + name_bytes.len()) as libc::socklen_t;
+                    let ret = libc::connect(fd, &addr as *const _ as *const libc::sockaddr, addr_len);
+                    if ret < 0 {
+                        let err = std::io::Error::last_os_error();
+                        libc::close(fd);
+                        Err(err)
+                    } else {
+                        Ok(UnixStream::from_raw_fd(fd))
+                    }
+                }
+            } else {
+                println!("[2] fallback パスで接続試行");
+                UnixStream::connect(mzkana_core::mozc::default_socket_path())
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            println!("[2] fallback パスで接続試行");
+            UnixStream::connect(mzkana_core::mozc::default_socket_path())
+        }
+    };
+
+    let mut stream = match stream_result {
+        Ok(s) => { println!("[2] 接続成功"); s }
+        Err(e) => { println!("[2] 接続失敗: {e}"); return; }
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+
+    // 3. Check if server sends a greeting before we write anything
+    println!("[3] サーバーからの先行送信チェック (200ms待機)...");
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let mut greeting = [0u8; 64];
+    match stream.read(&mut greeting) {
+        Ok(0) => println!("    → EOF (サーバーが即時クローズ)"),
+        Ok(n) => println!("    → {n}バイト受信 (greeting): {:02x?}", &greeting[..n]),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+               || e.kind() == std::io::ErrorKind::TimedOut => {
+            println!("    → タイムアウト (先行送信なし、正常)");
+        }
+        Err(e) => println!("    → エラー: {e}"),
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+
+    // 4. Send CREATE_SESSION and show raw bytes
+    // Command { input { type: CREATE_SESSION(0) } }
+    // Encoded: [0a 02 08 00]  frame: [04 00 00 00 0a 02 08 00]
+    let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x00];
+    let mut frame = Vec::with_capacity(4 + proto.len());
+    frame.extend_from_slice(&(proto.len() as u32).to_le_bytes());
+    frame.extend_from_slice(proto);
+    println!("[4] CREATE_SESSION 送信: {:02x?}", frame);
+    match stream.write_all(&frame) {
+        Ok(()) => println!("    → 送信成功"),
+        Err(e) => { println!("    → 送信失敗: {e}"); return; }
+    }
+
+    // 5. Read response length
+    println!("[5] レスポンス長 (4バイト) 読み取り...");
+    let mut len_buf = [0u8; 4];
+    match stream.read_exact(&mut len_buf) {
+        Ok(()) => {
+            let resp_len = u32::from_le_bytes(len_buf) as usize;
+            println!("    → 長さバイト: {:02x?} → {resp_len} バイト", len_buf);
+            // Try big-endian too for diagnosis
+            let resp_len_be = u32::from_be_bytes(len_buf) as usize;
+            println!("    → big-endian 解釈だと: {resp_len_be} バイト");
+
+            // 6. Read response body
+            if resp_len < 65536 {
+                let mut resp = vec![0u8; resp_len];
+                match stream.read_exact(&mut resp) {
+                    Ok(()) => println!("[6] レスポンス本体 ({resp_len}B): {:02x?}", &resp[..resp_len.min(64)]),
+                    Err(e) => println!("[6] レスポンス本体 読み取り失敗: {e}"),
+                }
+            } else {
+                println!("[6] 長さが異常 ({resp_len}), big-endian かも");
+            }
+        }
+        Err(e) => println!("    → 読み取り失敗: {e}"),
     }
 }
 

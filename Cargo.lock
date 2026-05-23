@@ -419,6 +419,7 @@ name = "mzkana-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "mzkana-core",
  "schemars",
  "serde_json",
