@@ -128,6 +128,20 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
     ic->inputPanel().setPreedit(preeditText);
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+
+    if (result.forward_key_len > 0) {
+        std::string keyName(reinterpret_cast<const char *>(result.forward_key),
+                            result.forward_key_len);
+        fcitx::KeyStates states;
+        if (result.forward_modifiers & 0x01) states |= fcitx::KeyState::Shift;
+        if (result.forward_modifiers & 0x02) states |= fcitx::KeyState::Ctrl;
+        if (result.forward_modifiers & 0x04) states |= fcitx::KeyState::Alt;
+        if (result.forward_modifiers & 0x08) states |= fcitx::KeyState::Super;
+        auto sym = fcitx::Key::keySymFromString(keyName);
+        if (sym != FcitxKey_None) {
+            ic->forwardKey(fcitx::Key(sym, states));
+        }
+    }
 }
 
 void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {

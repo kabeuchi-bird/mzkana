@@ -41,6 +41,17 @@ typedef struct MzkanaResult {
    */
   uint8_t passthrough_key[64];
   uint32_t passthrough_key_len;
+  /**
+   * XKB keysym name of a key to forward to the application with modifier synthesis.
+   * Non-empty only when a modifier+key token was not consumed by Mozc.
+   * The C++ layer should call ic->forwardKey() with this key and `forward_modifiers`.
+   */
+  uint8_t forward_key[64];
+  uint32_t forward_key_len;
+  /**
+   * Modifier bitmask for `forward_key`: bit0=Shift, bit1=Ctrl, bit2=Alt, bit3=Super.
+   */
+  uint8_t forward_modifiers;
 } MzkanaResult;
 
 /**
