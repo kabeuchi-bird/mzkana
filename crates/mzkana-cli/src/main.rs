@@ -386,7 +386,7 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
                 Ok(0) => { println!("  recv: EOF after {} bytes: {:02x?}", got.len(), got); break; }
                 Ok(_) => {
                     got.push(b[0]);
-                    if got.len() >= 16 { println!("  recv: {} bytes so far: {:02x?} (继续读取...)", got.len(), got); break; }
+                    if got.len() >= 16 { println!("  recv: {} bytes 受信 (続けて読み取ります): {:02x?}", got.len(), got); break; }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
                     println!("  recv: タイムアウト ({}秒), {} bytes received: {:02x?}", 5, got.len(), got);
@@ -403,8 +403,7 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
     let connect_fresh = |label: &str| -> Option<UnixStream> {
         let s = if let Some(ref p) = socket.map(|x| x.to_path_buf()) {
             UnixStream::connect(p).ok()
-        } else if let Some(ref abs) = abs_name_opt {
-            let _ = abs; // used via mzkana_core
+        } else if abs_name_opt.is_some() {
             mzkana_core::mozc::connect_mozc_abstract().ok()
         } else {
             UnixStream::connect(mzkana_core::mozc::default_socket_path()).ok()
@@ -444,11 +443,11 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
                 try_handshake(&mut s, Some(&key_c), &format!("hash のみキー ({} bytes): {hash}", key_c.len()));
             }
 
-            // Variant D: key = raw bytes (hex-decoded)
+            // Variant D: key = raw bytes (hex-decoded); skip if hash length is odd
             let key_d: Vec<u8> = (0..hash.len()).step_by(2)
-                .filter_map(|i| u8::from_str_radix(&hash[i..i+2], 16).ok())
+                .filter_map(|i| hash.get(i..i+2).and_then(|s| u8::from_str_radix(s, 16).ok()))
                 .collect();
-            if key_d.len() == hash.len() / 2 {
+            if hash.len() % 2 == 0 && key_d.len() == hash.len() / 2 {
                 if let Some(mut s) = connect_fresh("D: 16バイト生キー") {
                     try_handshake(&mut s, Some(&key_d), &format!("hex デコードキー ({} bytes): {:02x?}", key_d.len(), key_d));
                 }
