@@ -240,15 +240,66 @@ fn print_action(action: &OutputAction) {
     }
 }
 
+/// Find the owning PID of an abstract socket by matching its inode
+/// (from /proc/net/unix) against /proc/*/fd/ symlinks.
+#[cfg(target_os = "linux")]
+fn find_socket_owner(socket_name: &str) -> Option<(u32, String)> {
+    // Parse /proc/net/unix to find the inode for this socket name
+    let unix_data = std::fs::read_to_string("/proc/net/unix").ok()?;
+    let target_inode: u64 = unix_data.lines().find_map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 8 && cols.last() == Some(&socket_name) {
+            cols[6].parse().ok()
+        } else {
+            None
+        }
+    })?;
+    if target_inode == 0 {
+        return None;
+    }
+
+    // Walk /proc/*/fd/ to find which process has an fd pointing to this inode
+    let proc_dir = std::fs::read_dir("/proc").ok()?;
+    for entry in proc_dir.flatten() {
+        let pid_str = entry.file_name();
+        let pid: u32 = pid_str.to_string_lossy().parse().ok()?;
+        let fd_dir = format!("/proc/{pid}/fd");
+        let Ok(fds) = std::fs::read_dir(&fd_dir) else { continue };
+        for fd_entry in fds.flatten() {
+            if let Ok(target) = std::fs::read_link(fd_entry.path()) {
+                let t = target.to_string_lossy();
+                // Socket symlinks look like "socket:[inode]"
+                if t == format!("socket:[{target_inode}]") {
+                    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    return Some((pid, comm));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn cmd_diagnose_mozc(socket: Option<&Path>) {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    // 1. Show socket discovery result
+    // 1. Show socket discovery result + owner
     println!("=== Mozc IPC診断 ===");
     match find_abstract_socket_name() {
-        Some(ref name) => println!("[1] abstract socket 発見: {name}"),
+        Some(ref name) => {
+            print!("[1] abstract socket 発見: {name}");
+            #[cfg(target_os = "linux")]
+            match find_socket_owner(name) {
+                Some((pid, comm)) => println!("  (所有: PID={pid} [{comm}])"),
+                None => println!("  (所有プロセス不明)"),
+            }
+            #[cfg(not(target_os = "linux"))]
+            println!();
+        }
         None => println!("[1] abstract socket 未発見 (/proc/net/unix に .mozc. エントリなし)"),
     }
     println!("    fallback パス: {}", mzkana_core::mozc::default_socket_path().display());
@@ -274,8 +325,8 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         Ok(s) => { println!("[2] 接続成功"); s }
         Err(e) => { println!("[2] 接続失敗: {e}"); return; }
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
     // 3. Check if server sends a greeting before we write anything
     println!("[3] サーバーからの先行送信チェック (200ms待機)...");
@@ -290,7 +341,7 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         }
         Err(e) => println!("    → エラー: {e}"),
     }
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
     // 4. Send CREATE_SESSION and show raw bytes
     // Command { input { type: CREATE_SESSION(1) } }
