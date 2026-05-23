@@ -347,37 +347,58 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
     }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
-    // 4. Send CREATE_SESSION and show raw bytes
-    // Command { input { type: CREATE_SESSION(1) } }
-    // Encoded: [0a 02 08 01]  frame: [size_t NE len][proto bytes]
-    let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x01];
-    let len_prefix = proto.len().to_ne_bytes();
-    let mut frame = Vec::with_capacity(len_prefix.len() + proto.len());
-    frame.extend_from_slice(&len_prefix);
-    frame.extend_from_slice(proto);
-    println!("[4] CREATE_SESSION 送信: {:02x?}", frame);
-    match stream.write_all(&frame) {
-        Ok(()) => println!("    → 送信成功"),
-        Err(e) => { println!("    → 送信失敗: {e}"); return; }
+    // Helper: send a byte slice with size_t length prefix (Mozc SendMSG framing).
+    let send_msg = |stream: &mut UnixStream, data: &[u8], label: &str| -> bool {
+        let len_prefix = data.len().to_ne_bytes();
+        let mut frame = Vec::with_capacity(len_prefix.len() + data.len());
+        frame.extend_from_slice(&len_prefix);
+        frame.extend_from_slice(data);
+        println!("{label}: {:02x?}", frame);
+        match stream.write_all(&frame) {
+            Ok(()) => { println!("    → 送信成功"); true }
+            Err(e) => { println!("    → 送信失敗: {e}"); false }
+        }
+    };
+
+    // 4. Send IPC key (Mozc authentication step).
+    // The client must send the abstract socket name (without leading '@')
+    // as the first message before any commands.
+    let ipc_key_opt = find_abstract_socket_name();
+    if let Some(ref abs_name) = ipc_key_opt {
+        let key = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
+        println!("[4] IPC キー送信 ({} bytes): {key}", key.len());
+        if !send_msg(&mut stream, key.as_bytes(), "    フレーム") {
+            return;
+        }
+    } else {
+        println!("[4] abstract socket 未発見、IPC キー送信スキップ");
     }
 
-    // 5. Read response length (size_t = 8 bytes on 64-bit)
-    println!("[5] レスポンス長 ({}バイト) 読み取り...", std::mem::size_of::<usize>());
+    // 5. Send CREATE_SESSION
+    // Command { input { type: CREATE_SESSION(1) } } → [0a 02 08 01]
+    let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x01];
+    println!("[5] CREATE_SESSION 送信 (proto: {:02x?})", proto);
+    if !send_msg(&mut stream, proto, "    フレーム") {
+        return;
+    }
+
+    // 6. Read response length (size_t = 8 bytes on 64-bit)
+    println!("[6] レスポンス長 ({}バイト) 読み取り...", std::mem::size_of::<usize>());
     let mut len_buf = [0u8; std::mem::size_of::<usize>()];
     match stream.read_exact(&mut len_buf) {
         Ok(()) => {
             let resp_len = usize::from_ne_bytes(len_buf);
             println!("    → 長さバイト: {:02x?} → {resp_len} バイト", len_buf);
 
-            // 6. Read response body
+            // 7. Read response body
             if resp_len < 65536 {
                 let mut resp = vec![0u8; resp_len];
                 match stream.read_exact(&mut resp) {
-                    Ok(()) => println!("[6] レスポンス本体 ({resp_len}B): {:02x?}", &resp[..resp_len.min(64)]),
-                    Err(e) => println!("[6] レスポンス本体 読み取り失敗: {e}"),
+                    Ok(()) => println!("[7] レスポンス本体 ({resp_len}B): {:02x?}", &resp[..resp_len.min(64)]),
+                    Err(e) => println!("[7] レスポンス本体 読み取り失敗: {e}"),
                 }
             } else {
-                println!("[6] 長さが異常 ({resp_len}), big-endian かも");
+                println!("[7] 長さが異常 ({resp_len}), big-endian かも");
             }
         }
         Err(e) => println!("    → 読み取り失敗: {e}"),
