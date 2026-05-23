@@ -108,12 +108,25 @@ impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::D
 
 /// Blocking Mozc IPC client over a Unix domain socket.
 ///
-/// Wire framing: `usize::to_ne_bytes(length) | proto_bytes` in both directions.
-/// The length prefix is `sizeof(size_t)` bytes in native byte order, matching
-/// Mozc's C++ IPC protocol (`size_t buf_size` passed to `SendMSG`/`RecvMSG`).
+/// Wire framing per `SendMSG`/`RecvMSG` in Mozc's C++ IPC:
+///   `usize::to_ne_bytes(length) | bytes`  (size_t, native byte order)
+///
+/// Connection sequence:
+///   1. connect to abstract socket
+///   2. send IPC key (the socket path name without leading `@`) via SendMSG
+///   3. send/receive commands via SendMSG/RecvMSG
 pub struct MozcClient {
     stream: UnixStream,
     session_id: Option<u64>,
+}
+
+/// Send a raw byte slice using Mozc's `size_t`-prefixed framing.
+fn send_msg(stream: &mut UnixStream, data: &[u8]) -> io::Result<()> {
+    let len_prefix = data.len().to_ne_bytes();
+    let mut frame = Vec::with_capacity(len_prefix.len() + data.len());
+    frame.extend_from_slice(&len_prefix);
+    frame.extend_from_slice(data);
+    stream.write_all(&frame)
 }
 
 impl MozcClient {
@@ -123,6 +136,12 @@ impl MozcClient {
     /// Otherwise, on Linux the abstract namespace socket is discovered from
     /// `/proc/net/unix` first; if that fails, the filesystem fallback path is tried.
     pub fn connect(socket_path: Option<&Path>) -> Result<Self, MozcError> {
+        // Discover the abstract socket name so we can use it as the IPC key.
+        #[cfg(target_os = "linux")]
+        let abs_name = find_abstract_socket_name();
+        #[cfg(not(target_os = "linux"))]
+        let abs_name: Option<String> = None;
+
         let stream = if let Some(path) = socket_path {
             UnixStream::connect(path)?
         } else {
@@ -139,6 +158,15 @@ impl MozcClient {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut client = Self { stream, session_id: None };
+
+        // Mozc requires the client to authenticate by sending the IPC key
+        // (the abstract socket name without the leading '@') before any commands.
+        if let Some(ref name) = abs_name {
+            let key = name.strip_prefix('@').unwrap_or(name.as_str());
+            send_msg(&mut client.stream, key.as_bytes())?;
+            tracing::debug!("sent IPC key ({} bytes): {key}", key.len());
+        }
+
         client.create_session()?;
         Ok(client)
     }
@@ -150,13 +178,7 @@ impl MozcClient {
 
     fn send_recv(&mut self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let cmd_bytes = encode_command(input);
-        // Mozc IPC framing: size_t (native endian) length prefix + proto bytes.
-        // On 64-bit Linux, size_t = 8 bytes; using usize matches sizeof(size_t).
-        let len_prefix = cmd_bytes.len().to_ne_bytes();
-        let mut frame = Vec::with_capacity(len_prefix.len() + cmd_bytes.len());
-        frame.extend_from_slice(&len_prefix);
-        frame.extend_from_slice(&cmd_bytes);
-        self.stream.write_all(&frame)?;
+        send_msg(&mut self.stream, &cmd_bytes)?;
 
         let mut len_buf = [0u8; std::mem::size_of::<usize>()];
         self.stream.read_exact(&mut len_buf)?;
