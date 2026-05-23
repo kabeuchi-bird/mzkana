@@ -2,7 +2,7 @@ pub(crate) mod codec;
 pub(crate) mod proto;
 pub mod client;
 
-pub use client::{connect_mozc_abstract, default_socket_path, find_abstract_socket_name, MozcClient, MozcError};
+pub use client::{connect_mozc_abstract, default_socket_path, find_abstract_socket_name, ipc_key_from_socket_name, MozcClient, MozcError};
 pub use proto::{composition_mode, DecodedOutput};
 
 /// Decoded Mozc server response exposed to callers.
