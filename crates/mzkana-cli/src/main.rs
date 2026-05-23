@@ -369,15 +369,46 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         }
     };
 
-    // Helper: try a full handshake (optional key + CREATE_SESSION) and report response
-    let try_handshake = |stream: &mut UnixStream, key: Option<&[u8]>, label: &str| {
-        println!("  --- {label} ---");
-        if let Some(k) = key {
-            if !send_msg(stream, k, "  key") { return; }
+    // Helper: send bytes WITHOUT any length prefix (raw write)
+    let send_raw = |stream: &mut UnixStream, data: &[u8], label: &str| -> bool {
+        print!("{label} ({} bytes raw): {:02x?}", data.len(), data);
+        match stream.write_all(data) {
+            Ok(()) => { println!(" → OK"); true }
+            Err(e) => { println!(" → 失敗: {e}"); false }
         }
+    };
+
+    // Helper: try a full handshake and report response.
+    // key_framed: Some(bytes) = send with size_t framing; None = no key.
+    // key_raw: Some(bytes) = send raw bytes (no framing).
+    let try_handshake = |stream: &mut UnixStream, key_framed: Option<&[u8]>,
+                         key_raw_opt: Option<&[u8]>, label: &str| {
+        println!("  --- {label} ---");
+        if let Some(k) = key_framed {
+            if !send_msg(stream, k, "  key(framed)") { return; }
+        }
+        if let Some(k) = key_raw_opt {
+            if !send_raw(stream, k, "  key(raw)") { return; }
+        }
+
+        // After sending key, wait briefly to see if server responds before CREATE_SESSION
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut peeked = [0u8; 32];
+        match stream.read(&mut peeked) {
+            Ok(0) => { println!("  [key後] EOF"); return; }
+            Ok(n) => println!("  [key後] サーバーから {} bytes: {:02x?}", n, &peeked[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                   || e.kind() == std::io::ErrorKind::TimedOut => {
+                println!("  [key後] 応答なし (正常)");
+            }
+            Err(e) => { println!("  [key後] エラー: {e}"); return; }
+        }
+
+        // Send CREATE_SESSION with size_t framing
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
         if !send_msg(stream, &[0x0a, 0x02, 0x08, 0x01], "  cmd") { return; }
 
-        // Try reading up to 16 bytes one at a time to see any partial response
+        // Read response byte-by-byte to capture any partial data before EOF
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let mut got = Vec::new();
         loop {
@@ -386,16 +417,39 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
                 Ok(0) => { println!("  recv: EOF after {} bytes: {:02x?}", got.len(), got); break; }
                 Ok(_) => {
                     got.push(b[0]);
-                    if got.len() >= 16 { println!("  recv: {} bytes 受信 (続けて読み取ります): {:02x?}", got.len(), got); break; }
+                    if got.len() >= 32 {
+                        println!("  recv: {} bytes 受信 (続けて読み取ります): {:02x?}", got.len(), got);
+                        break;
+                    }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
-                    println!("  recv: タイムアウト ({}秒), {} bytes received: {:02x?}", 5, got.len(), got);
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                       || e.kind() == std::io::ErrorKind::TimedOut => {
+                    println!("  recv: タイムアウト (5秒), {} bytes received: {:02x?}", got.len(), got);
                     break;
                 }
                 Err(e) => { println!("  recv: エラー: {e}, {} bytes before: {:02x?}", got.len(), got); break; }
             }
         }
     };
+
+    // Read IPC key from .session.ipc file (protobuf field 1)
+    let ipc_file_key: Option<Vec<u8>> = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        let path = std::path::PathBuf::from(&home).join(".config/mozc/.session.ipc");
+        std::fs::read(&path).ok().and_then(|data| {
+            // Parse: 0a <len> <bytes> ...
+            if data.len() >= 2 && data[0] == 0x0a {
+                let field_len = data[1] as usize;
+                if data.len() >= 2 + field_len {
+                    Some(data[2..2 + field_len].to_vec())
+                } else { None }
+            } else { None }
+        })
+    };
+    if let Some(ref k) = ipc_file_key {
+        println!("[ipc_file_key] .session.ipc field1 ({} bytes): {:02x?}", k.len(),
+                 &k[..k.len().min(40)]);
+    }
 
     // 2. Attempt raw connections with different key formats
     println!("\n[2] 各種キー形式で接続を試行...");
@@ -418,40 +472,53 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         s
     };
 
-    // Variant A: no key (direct CREATE_SESSION)
+    // Variant A: no key
     if let Some(mut s) = connect_fresh("A: キーなし") {
-        try_handshake(&mut s, None, "キーなし → CREATE_SESSION");
+        try_handshake(&mut s, None, None, "キーなし → CREATE_SESSION");
     }
 
-    // Variant B: key = full socket name without '@'
-    if let Some(ref abs_name) = abs_name_opt {
-        let key_b = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str()).as_bytes().to_vec();
-        if let Some(mut s) = connect_fresh("B: ソケット名キー") {
-            try_handshake(&mut s, Some(&key_b), &format!("ソケット名キー ({} bytes)", key_b.len()));
-        }
-    }
-
-    // Variant C: key = just the hash (32 hex chars between the dots)
+    // Variant C: key = hash as ASCII (size_t framed)
     if let Some(ref abs_name) = abs_name_opt {
         let name = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
-        // name = "tmp/.mozc.{hash}.session"
-        let hash_opt = name.strip_prefix("tmp/.mozc.")
-            .and_then(|s| s.strip_suffix(".session"));
+        let hash_opt = name.strip_prefix("tmp/.mozc.").and_then(|s| s.strip_suffix(".session"));
         if let Some(hash) = hash_opt {
             let key_c = hash.as_bytes().to_vec();
-            if let Some(mut s) = connect_fresh("C: hash のみキー") {
-                try_handshake(&mut s, Some(&key_c), &format!("hash のみキー ({} bytes): {hash}", key_c.len()));
+            if let Some(mut s) = connect_fresh("C: hash ASCII キー (size_t framed)") {
+                try_handshake(&mut s, Some(&key_c), None, &format!("C: hash {}B framed", key_c.len()));
             }
 
-            // Variant D: key = raw bytes (hex-decoded); skip if hash length is odd
+            // Variant D: hex-decoded 16 bytes, size_t framed
             let key_d: Vec<u8> = (0..hash.len()).step_by(2)
                 .filter_map(|i| hash.get(i..i+2).and_then(|s| u8::from_str_radix(s, 16).ok()))
                 .collect();
             if hash.len() % 2 == 0 && key_d.len() == hash.len() / 2 {
-                if let Some(mut s) = connect_fresh("D: 16バイト生キー") {
-                    try_handshake(&mut s, Some(&key_d), &format!("hex デコードキー ({} bytes): {:02x?}", key_d.len(), key_d));
+                if let Some(mut s) = connect_fresh("D: 16B 生キー (size_t framed)") {
+                    try_handshake(&mut s, Some(&key_d), None, &format!("D: raw {:02x?}", &key_d));
                 }
             }
+
+            // Variant E: hash as ASCII, NO framing (raw 32 bytes)
+            if let Some(mut s) = connect_fresh("E: hash ASCII キー (フレームなし)") {
+                try_handshake(&mut s, None, Some(key_c.as_slice()), "E: hash raw (no framing)");
+            }
+
+            // Variant F: hex-decoded 16 bytes, NO framing
+            if hash.len() % 2 == 0 && key_d.len() == hash.len() / 2 {
+                if let Some(mut s) = connect_fresh("F: 16B 生キー (フレームなし)") {
+                    try_handshake(&mut s, None, Some(&key_d), "F: raw bytes no framing");
+                }
+            }
+        }
+    }
+
+    // Variant G: key from .session.ipc file, size_t framed
+    if let Some(ref k) = ipc_file_key {
+        if let Some(mut s) = connect_fresh("G: session.ipc field1 (size_t framed)") {
+            try_handshake(&mut s, Some(k), None, &format!("G: ipc_file_key {}B framed", k.len()));
+        }
+        // Variant H: key from file, NO framing
+        if let Some(mut s) = connect_fresh("H: session.ipc field1 (フレームなし)") {
+            try_handshake(&mut s, None, Some(k), &format!("H: ipc_file_key {}B raw", k.len()));
         }
     }
 }
