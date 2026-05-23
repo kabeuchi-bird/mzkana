@@ -286,122 +286,174 @@ fn find_socket_owner(socket_name: &str) -> Option<(u32, String)> {
     None
 }
 
+/// Show regular files open by a process (skip sockets/pipes).
+#[cfg(target_os = "linux")]
+fn show_process_files(pid: u32) {
+    let fd_dir = format!("/proc/{pid}/fd");
+    let Ok(fds) = std::fs::read_dir(&fd_dir) else {
+        println!("    (fd ディレクトリ読み取り失敗: 権限不足)");
+        return;
+    };
+    let mut found = false;
+    for entry in fds.flatten() {
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            let t = target.to_string_lossy();
+            if !t.starts_with("socket:[") && !t.starts_with("pipe:[") && !t.starts_with("anon_inode:") {
+                println!("    fd {}: {t}", entry.file_name().to_string_lossy());
+                found = true;
+                // Show small file contents (potential key files)
+                if let Ok(contents) = std::fs::read(&*t) {
+                    if contents.len() <= 256 {
+                        println!("      内容 ({} bytes): {:02x?}", contents.len(), contents);
+                        if let Ok(s) = std::str::from_utf8(&contents) {
+                            let s = s.trim_end_matches('\0');
+                            if !s.is_empty() {
+                                println!("      UTF-8: {s:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !found {
+        println!("    (通常ファイルなし — ソケット/パイプのみ)");
+    }
+}
+
 fn cmd_diagnose_mozc(socket: Option<&Path>) {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    // 1. Show socket discovery result + owner
     println!("=== Mozc IPC診断 ===");
-    match find_abstract_socket_name() {
+
+    // 1. Socket discovery + owner
+    let abs_name_opt = find_abstract_socket_name();
+    let owner_pid: Option<u32> = match abs_name_opt {
         Some(ref name) => {
             print!("[1] abstract socket 発見: {name}");
             #[cfg(target_os = "linux")]
-            match find_socket_owner(name) {
-                Some((pid, comm)) => println!("  (所有: PID={pid} [{comm}])"),
-                None => println!("  (所有プロセス不明)"),
-            }
+            let pid_opt = match find_socket_owner(name) {
+                Some((pid, ref comm)) => { println!("  (所有: PID={pid} [{comm}])"); Some(pid) }
+                None => { println!("  (所有プロセス不明)"); None }
+            };
             #[cfg(not(target_os = "linux"))]
-            println!();
+            let pid_opt: Option<u32> = { println!(); None };
+            pid_opt
         }
-        None => println!("[1] abstract socket 未発見 (/proc/net/unix に .mozc. エントリなし)"),
-    }
+        None => {
+            println!("[1] abstract socket 未発見 (/proc/net/unix に .mozc. エントリなし)");
+            None
+        }
+    };
     println!("    fallback パス: {}", mzkana_core::mozc::default_socket_path().display());
 
-    // 2. Attempt raw connection
-    let stream_result: std::io::Result<UnixStream> = if let Some(p) = socket {
-        println!("[2] 指定パスで接続試行: {}", p.display());
-        UnixStream::connect(p)
-    } else {
-        match find_abstract_socket_name() {
-            Some(ref abs) => {
-                println!("[2] abstract socket に接続試行: {abs}");
-                mzkana_core::mozc::connect_mozc_abstract()
-            }
-            None => {
-                println!("[2] fallback パスで接続試行");
-                UnixStream::connect(mzkana_core::mozc::default_socket_path())
-            }
-        }
-    };
-
-    let mut stream = match stream_result {
-        Ok(s) => { println!("[2] 接続成功"); s }
-        Err(e) => { println!("[2] 接続失敗: {e}"); return; }
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-
-    // 3. Check if server sends a greeting before we write anything
-    println!("[3] サーバーからの先行送信チェック (200ms待機)...");
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-    let mut greeting = [0u8; 64];
-    match stream.read(&mut greeting) {
-        Ok(0) => println!("    → EOF (サーバーが即時クローズ)"),
-        Ok(n) => println!("    → {n}バイト受信 (greeting): {:02x?}", &greeting[..n]),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-               || e.kind() == std::io::ErrorKind::TimedOut => {
-            println!("    → タイムアウト (先行送信なし、正常)");
-        }
-        Err(e) => println!("    → エラー: {e}"),
+    // 1b. Show files open by mozc_server to find the IPC key file
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = owner_pid {
+        println!("[1b] mozc_server (PID={pid}) の開いているファイル:");
+        show_process_files(pid);
     }
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
-    // Helper: send a byte slice with size_t length prefix (Mozc SendMSG framing).
+    // Helper: send bytes with size_t length prefix
     let send_msg = |stream: &mut UnixStream, data: &[u8], label: &str| -> bool {
         let len_prefix = data.len().to_ne_bytes();
         let mut frame = Vec::with_capacity(len_prefix.len() + data.len());
         frame.extend_from_slice(&len_prefix);
         frame.extend_from_slice(data);
-        println!("{label}: {:02x?}", frame);
+        print!("{label} ({} bytes): {:02x?}", frame.len(), frame);
         match stream.write_all(&frame) {
-            Ok(()) => { println!("    → 送信成功"); true }
-            Err(e) => { println!("    → 送信失敗: {e}"); false }
+            Ok(()) => { println!(" → OK"); true }
+            Err(e) => { println!(" → 失敗: {e}"); false }
         }
     };
 
-    // 4. Send IPC key (Mozc authentication step).
-    // The client must send the abstract socket name (without leading '@')
-    // as the first message before any commands.
-    let ipc_key_opt = find_abstract_socket_name();
-    if let Some(ref abs_name) = ipc_key_opt {
-        let key = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
-        println!("[4] IPC キー送信 ({} bytes): {key}", key.len());
-        if !send_msg(&mut stream, key.as_bytes(), "    フレーム") {
-            return;
+    // Helper: try a full handshake (optional key + CREATE_SESSION) and report response
+    let try_handshake = |stream: &mut UnixStream, key: Option<&[u8]>, label: &str| {
+        println!("  --- {label} ---");
+        if let Some(k) = key {
+            if !send_msg(stream, k, "  key") { return; }
         }
-    } else {
-        println!("[4] abstract socket 未発見、IPC キー送信スキップ");
-    }
+        if !send_msg(stream, &[0x0a, 0x02, 0x08, 0x01], "  cmd") { return; }
 
-    // 5. Send CREATE_SESSION
-    // Command { input { type: CREATE_SESSION(1) } } → [0a 02 08 01]
-    let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x01];
-    println!("[5] CREATE_SESSION 送信 (proto: {:02x?})", proto);
-    if !send_msg(&mut stream, proto, "    フレーム") {
-        return;
-    }
-
-    // 6. Read response length (size_t = 8 bytes on 64-bit)
-    println!("[6] レスポンス長 ({}バイト) 読み取り...", std::mem::size_of::<usize>());
-    let mut len_buf = [0u8; std::mem::size_of::<usize>()];
-    match stream.read_exact(&mut len_buf) {
-        Ok(()) => {
-            let resp_len = usize::from_ne_bytes(len_buf);
-            println!("    → 長さバイト: {:02x?} → {resp_len} バイト", len_buf);
-
-            // 7. Read response body
-            if resp_len < 65536 {
-                let mut resp = vec![0u8; resp_len];
-                match stream.read_exact(&mut resp) {
-                    Ok(()) => println!("[7] レスポンス本体 ({resp_len}B): {:02x?}", &resp[..resp_len.min(64)]),
-                    Err(e) => println!("[7] レスポンス本体 読み取り失敗: {e}"),
+        // Try reading up to 16 bytes one at a time to see any partial response
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut got = Vec::new();
+        loop {
+            let mut b = [0u8; 1];
+            match stream.read(&mut b) {
+                Ok(0) => { println!("  recv: EOF after {} bytes: {:02x?}", got.len(), got); break; }
+                Ok(_) => {
+                    got.push(b[0]);
+                    if got.len() >= 16 { println!("  recv: {} bytes so far: {:02x?} (继续读取...)", got.len(), got); break; }
                 }
-            } else {
-                println!("[7] 長さが異常 ({resp_len}), big-endian かも");
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                    println!("  recv: タイムアウト ({}秒), {} bytes received: {:02x?}", 5, got.len(), got);
+                    break;
+                }
+                Err(e) => { println!("  recv: エラー: {e}, {} bytes before: {:02x?}", got.len(), got); break; }
             }
         }
-        Err(e) => println!("    → 読み取り失敗: {e}"),
+    };
+
+    // 2. Attempt raw connections with different key formats
+    println!("\n[2] 各種キー形式で接続を試行...");
+
+    let connect_fresh = |label: &str| -> Option<UnixStream> {
+        let s = if let Some(ref p) = socket.map(|x| x.to_path_buf()) {
+            UnixStream::connect(p).ok()
+        } else if let Some(ref abs) = abs_name_opt {
+            let _ = abs; // used via mzkana_core
+            mzkana_core::mozc::connect_mozc_abstract().ok()
+        } else {
+            UnixStream::connect(mzkana_core::mozc::default_socket_path()).ok()
+        };
+        match s {
+            Some(ref st) => {
+                let _ = st.set_write_timeout(Some(Duration::from_secs(3)));
+                println!("  [{label}] 接続成功");
+            }
+            None => println!("  [{label}] 接続失敗"),
+        }
+        s
+    };
+
+    // Variant A: no key (direct CREATE_SESSION)
+    if let Some(mut s) = connect_fresh("A: キーなし") {
+        try_handshake(&mut s, None, "キーなし → CREATE_SESSION");
+    }
+
+    // Variant B: key = full socket name without '@'
+    if let Some(ref abs_name) = abs_name_opt {
+        let key_b = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str()).as_bytes().to_vec();
+        if let Some(mut s) = connect_fresh("B: ソケット名キー") {
+            try_handshake(&mut s, Some(&key_b), &format!("ソケット名キー ({} bytes)", key_b.len()));
+        }
+    }
+
+    // Variant C: key = just the hash (32 hex chars between the dots)
+    if let Some(ref abs_name) = abs_name_opt {
+        let name = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
+        // name = "tmp/.mozc.{hash}.session"
+        let hash_opt = name.strip_prefix("tmp/.mozc.")
+            .and_then(|s| s.strip_suffix(".session"));
+        if let Some(hash) = hash_opt {
+            let key_c = hash.as_bytes().to_vec();
+            if let Some(mut s) = connect_fresh("C: hash のみキー") {
+                try_handshake(&mut s, Some(&key_c), &format!("hash のみキー ({} bytes): {hash}", key_c.len()));
+            }
+
+            // Variant D: key = raw bytes (hex-decoded)
+            let key_d: Vec<u8> = (0..hash.len()).step_by(2)
+                .filter_map(|i| u8::from_str_radix(&hash[i..i+2], 16).ok())
+                .collect();
+            if key_d.len() == hash.len() / 2 {
+                if let Some(mut s) = connect_fresh("D: 16バイト生キー") {
+                    try_handshake(&mut s, Some(&key_d), &format!("hex デコードキー ({} bytes): {:02x?}", key_d.len(), key_d));
+                }
+            }
+        }
     }
 }
 
