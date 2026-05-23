@@ -258,39 +258,15 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         println!("[2] 指定パスで接続試行: {}", p.display());
         UnixStream::connect(p)
     } else {
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(ref abs) = find_abstract_socket_name() {
-                let name = &abs[1..]; // strip '@'
+        match find_abstract_socket_name() {
+            Some(ref abs) => {
                 println!("[2] abstract socket に接続試行: {abs}");
-                unsafe {
-                    use std::os::unix::io::FromRawFd;
-                    let name_bytes = name.as_bytes();
-                    let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-                    let mut addr: libc::sockaddr_un = std::mem::zeroed();
-                    addr.sun_family = libc::AF_UNIX as _;
-                    let dst = addr.sun_path.as_mut_ptr() as *mut u8;
-                    std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(1), name_bytes.len());
-                    let path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
-                    let addr_len = (path_offset + 1 + name_bytes.len()) as libc::socklen_t;
-                    let ret = libc::connect(fd, &addr as *const _ as *const libc::sockaddr, addr_len);
-                    if ret < 0 {
-                        let err = std::io::Error::last_os_error();
-                        libc::close(fd);
-                        Err(err)
-                    } else {
-                        Ok(UnixStream::from_raw_fd(fd))
-                    }
-                }
-            } else {
+                mzkana_core::mozc::connect_mozc_abstract()
+            }
+            None => {
                 println!("[2] fallback パスで接続試行");
                 UnixStream::connect(mzkana_core::mozc::default_socket_path())
             }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            println!("[2] fallback パスで接続試行");
-            UnixStream::connect(mzkana_core::mozc::default_socket_path())
         }
     };
 
@@ -317,9 +293,9 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
 
     // 4. Send CREATE_SESSION and show raw bytes
-    // Command { input { type: CREATE_SESSION(0) } }
-    // Encoded: [0a 02 08 00]  frame: [04 00 00 00 0a 02 08 00]
-    let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x00];
+    // Command { input { type: CREATE_SESSION(1) } }
+    // Encoded: [0a 02 08 01]  frame: [04 00 00 00 0a 02 08 01]
+    let proto: &[u8] = &[0x0a, 0x02, 0x08, 0x01];
     let mut frame = Vec::with_capacity(4 + proto.len());
     frame.extend_from_slice(&(proto.len() as u32).to_le_bytes());
     frame.extend_from_slice(proto);

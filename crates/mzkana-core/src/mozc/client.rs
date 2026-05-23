@@ -27,16 +27,9 @@ pub fn default_socket_path() -> PathBuf {
 /// /proc/net/unix as `@tmp/.mozc.{hash}.session`.  This function discovers the
 /// name and returns a connected `UnixStream`, or an error if not found.
 #[cfg(target_os = "linux")]
-fn connect_mozc_abstract() -> io::Result<UnixStream> {
-    let unix_data = std::fs::read_to_string("/proc/net/unix")?;
-    let abs_name = unix_data
-        .lines()
-        .filter_map(|l| l.split_whitespace().last())
-        .find(|n| n.starts_with('@') && n.contains(".mozc.") && n.ends_with(".session"))
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Mozc abstract socket not found in /proc/net/unix")
-        })?
-        .to_string();
+pub fn connect_mozc_abstract() -> io::Result<UnixStream> {
+    let abs_name = find_abstract_socket_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Mozc abstract socket not found in /proc/net/unix"))?;
 
     // Strip the '@' sentinel to get the actual abstract name bytes.
     let name = &abs_name[1..];
@@ -53,9 +46,7 @@ fn connect_mozc_abstract() -> io::Result<UnixStream> {
 
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
         addr.sun_family = libc::AF_UNIX as _;
-        // Abstract socket: sun_path[0] = '\0', followed by the name.
         let dst = addr.sun_path.as_mut_ptr() as *mut u8;
-        // dst[0] is already 0 (zeroed); write name bytes starting at offset 1.
         std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(1), name_bytes.len());
 
         let path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
@@ -86,6 +77,11 @@ pub fn find_abstract_socket_name() -> Option<String> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn find_abstract_socket_name() -> Option<String> { None }
+
+#[cfg(not(target_os = "linux"))]
+pub fn connect_mozc_abstract() -> io::Result<UnixStream> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "abstract sockets not supported on this platform"))
+}
 
 #[derive(Debug)]
 pub enum MozcError {
