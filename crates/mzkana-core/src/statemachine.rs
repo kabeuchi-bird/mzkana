@@ -394,8 +394,10 @@ impl StateMachine {
             // participate in a timed chord (timed chord detection reads pending_keys).
             // Mutual chords fire via held_keys before pending_keys.push, so they don't
             // need the key here.
-            if !has_timed_chord {
+            if !has_timed_chord && !has_mutual_chord {
                 self.pending_keys.pop();
+                // Key has no mapping and cannot start a chord — pass through to application.
+                return vec![OutputAction::Passthrough(key.to_string())];
             }
             return actions;
         };
