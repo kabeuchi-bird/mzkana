@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mzkana_core::{
     load_layout, InputEvent, MozcClient, MozcOutput, OutputAction, StateMachine,
@@ -10,6 +10,10 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 pub struct Engine {
     sm: StateMachine,
     mozc: Option<MozcClient>,
+    /// Explicit socket path passed at construction time; None = auto-discover.
+    mozc_socket: Option<PathBuf>,
+    /// When Some, don't attempt to reconnect until this instant.
+    mozc_retry_at: Option<Instant>,
     config_path: PathBuf,
     _watcher: RecommendedWatcher,
     reload_rx: mpsc::Receiver<()>,
@@ -53,6 +57,8 @@ impl Engine {
         Ok(Self {
             sm,
             mozc,
+            mozc_socket: socket_path.map(Path::to_path_buf),
+            mozc_retry_at: None,
             config_path: config_path.to_path_buf(),
             _watcher: watcher,
             reload_rx,
@@ -93,6 +99,7 @@ impl Engine {
 
     pub fn key_event(&mut self, key: &str, is_down: bool, shift: bool) -> ProcessResult {
         let now = Instant::now();
+        self.try_reconnect_mozc(now);
         let event = if is_down {
             InputEvent { key: key.into(), kind: mzkana_core::KeyEventKind::Down, shift, is_repeat: false }
         } else {
@@ -111,6 +118,35 @@ impl Engine {
 
     pub fn mozc_available(&self) -> bool {
         self.mozc.is_some()
+    }
+
+    /// Try to connect Mozc if not currently connected and the backoff has expired.
+    ///
+    /// Uses a non-spawning quick connect (just checks existing sockets) so this
+    /// is cheap to call on every key event.  Backoff is 5 seconds between attempts
+    /// to avoid hammering the socket.
+    pub fn try_reconnect_mozc(&mut self, now: Instant) -> bool {
+        if self.mozc.is_some() {
+            return false;
+        }
+        if let Some(retry_at) = self.mozc_retry_at {
+            if now < retry_at {
+                return false;
+            }
+        }
+        match MozcClient::connect_quick(self.mozc_socket.as_deref()) {
+            Ok(c) => {
+                tracing::info!("Mozc reconnected");
+                self.mozc = Some(c);
+                self.mozc_retry_at = None;
+                true
+            }
+            Err(e) => {
+                tracing::debug!("Mozc reconnect failed: {e}; retrying in 5s");
+                self.mozc_retry_at = Some(now + Duration::from_secs(5));
+                false
+            }
+        }
     }
 
     pub fn reset(&mut self) {
@@ -163,14 +199,22 @@ impl Engine {
                     any_consumed = true;
                 }
                 OutputAction::SendModifiedKey { key, mods } => {
-                    let mozc_consumed = self.mozc.as_mut()
-                        .and_then(|mozc| mozc.send_modified_key(key, *mods).ok())
-                        .map(|out| {
+                    let send_result = self.mozc.as_mut()
+                        .map(|mozc| mozc.send_modified_key(key, *mods));
+
+                    let mozc_consumed = match send_result {
+                        Some(Ok(out)) => {
                             let consumed = out.consumed;
                             self.apply_mozc_output(out, &mut commit);
                             consumed
-                        })
-                        .unwrap_or(false);
+                        }
+                        Some(Err(_)) => {
+                            // I/O failure — mark dead so try_reconnect_mozc fires next event.
+                            self.mozc = None;
+                            false
+                        }
+                        None => false,
+                    };
 
                     if !mozc_consumed {
                         forward_key = Some(key.clone());
@@ -179,27 +223,44 @@ impl Engine {
                     any_consumed = true;
                 }
                 _ => {
-                    let result = self.dispatch_to_mozc(action);
-                    if result.is_some() || self.mozc.is_some() {
-                        // Mozc connected (or SendKana fallback produced output).
-                        if let Some(out) = result {
+                    match self.dispatch_to_mozc(action) {
+                        Some(out) => {
+                            let mozc_consumed = out.consumed;
                             self.apply_mozc_output(out, &mut commit);
+                            if mozc_consumed {
+                                any_consumed = true;
+                            } else {
+                                // Mozc returned but didn't consume (e.g. BackSpace on
+                                // empty preedit) — passthrough the natural key so the
+                                // application can handle it (e.g. delete text, undo).
+                                let pt = match action {
+                                    OutputAction::Backspace => Some("BackSpace"),
+                                    OutputAction::MozcSubmit => Some("Return"),
+                                    OutputAction::SendFunctionKey(name) => Some(name.as_str()),
+                                    _ => { any_consumed = true; None }
+                                };
+                                if let Some(key) = pt {
+                                    passthrough_key = Some(key.to_string());
+                                }
+                            }
                         }
-                        any_consumed = true;
-                    } else {
-                        // Mozc absent and no fallback output: route as passthrough so the
-                        // key is not silently swallowed.  `consumed = any_consumed ||
-                        // passthrough_key.is_none()`, so we must set passthrough_key to
-                        // make consumed false.
-                        let pt = match action {
-                            OutputAction::Backspace => Some("BackSpace"),
-                            OutputAction::MozcSubmit => Some("Return"),
-                            OutputAction::SendFunctionKey(name) => Some(name.as_str()),
-                            _ => None,
-                        };
-                        if let Some(key) = pt {
-                            tracing::warn!("Mozc absent; passing through as key: {key}");
-                            passthrough_key = Some(key.to_string());
+                        None if self.mozc.is_some() => {
+                            // I/O failure — mark dead so try_reconnect_mozc fires next event.
+                            self.mozc = None;
+                            any_consumed = true;
+                        }
+                        None => {
+                            // Mozc absent: passthrough the natural key.
+                            let pt = match action {
+                                OutputAction::Backspace => Some("BackSpace"),
+                                OutputAction::MozcSubmit => Some("Return"),
+                                OutputAction::SendFunctionKey(name) => Some(name.as_str()),
+                                _ => None,
+                            };
+                            if let Some(key) = pt {
+                                tracing::warn!("Mozc absent; passing through as key: {key}");
+                                passthrough_key = Some(key.to_string());
+                            }
                         }
                     }
                 }

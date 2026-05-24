@@ -87,6 +87,13 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
 
     // Hot-reload: check on every key event (inotify debounce makes this cheap)
     mzkana_engine_check_reload(engine_);
+
+    // Update status area if Mozc availability changed (e.g. reconnected after startup).
+    bool nowAvailable = mzkana_engine_mozc_available(engine_);
+    if (nowAvailable != mozcAvailable_) {
+        mozcAvailable_ = nowAvailable;
+        ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
+    }
 }
 
 void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
