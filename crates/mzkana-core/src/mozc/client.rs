@@ -105,9 +105,14 @@ static MOZC_SERVER_PATHS: &[&str] = &[
 /// fcitx5 main event thread during `Engine::new`.
 #[cfg(target_os = "linux")]
 fn ensure_mozc_server(timeout: Duration) -> Option<String> {
-    // Server already running?
+    // Server already running? Check abstract socket first, then filesystem socket.
     if let Some(name) = find_abstract_socket_name() {
         return Some(name);
+    }
+    // Filesystem socket exists → server is already up (e.g. launched by fcitx5-mozc).
+    // Don't spawn a second instance; return None so the caller uses the FS path.
+    if default_socket_path().exists() {
+        return None;
     }
 
     // Find the binary: well-known paths first, then PATH search.
@@ -224,6 +229,43 @@ pub struct MozcClient {
 }
 
 impl MozcClient {
+    /// Quick connection attempt: discover existing sockets only, no server spawn.
+    ///
+    /// Checks the abstract namespace socket and the default filesystem path.
+    /// Returns an error immediately if neither is found or connection fails.
+    /// Use this for periodic reconnect attempts on the key-event thread.
+    pub fn connect_quick(socket_path: Option<&Path>) -> Result<Self, MozcError> {
+        let (sp, abs) = if let Some(path) = socket_path {
+            (Some(path.to_path_buf()), None)
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                match find_abstract_socket_name() {
+                    Some(name) => (None, Some(name)),
+                    None => {
+                        let fs = default_socket_path();
+                        if fs.exists() {
+                            (Some(fs), None)
+                        } else {
+                            return Err(MozcError::NotConnected);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            { (Some(default_socket_path()), None) }
+        };
+
+        let mut client = Self {
+            socket_path: sp,
+            abstract_name: abs,
+            session_id: None,
+            _not_sync: PhantomData,
+        };
+        client.create_session()?;
+        Ok(client)
+    }
+
     /// Connect to the Mozc server and create a session.
     ///
     /// If `socket_path` is given it is used directly (filesystem socket).
