@@ -356,7 +356,7 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         show_process_files(pid);
     }
 
-    // Helper: send bytes with size_t length prefix
+    // Helper: send bytes with size_t length prefix (8-byte NE)
     let send_msg = |stream: &mut UnixStream, data: &[u8], label: &str| -> bool {
         let len_prefix = data.len().to_ne_bytes();
         let mut frame = Vec::with_capacity(len_prefix.len() + data.len());
@@ -559,6 +559,77 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         // Variant H: key from file, NO framing
         if let Some(mut s) = connect_fresh("H: session.ipc field1 (フレームなし)") {
             try_handshake(&mut s, None, Some(k), &format!("H: ipc_file_key {}B raw", k.len()));
+        }
+    }
+
+    // Variants K: uint32 (4-byte LE) framing for both key and command.
+    // This is the most likely correct protocol: the original attempt with uint32-only
+    // command (no key) got EAGAIN (server responded but we read response as size_t).
+    let send_u32 = |stream: &mut UnixStream, data: &[u8], label: &str| -> bool {
+        let len_prefix = (data.len() as u32).to_le_bytes();
+        let mut frame = Vec::with_capacity(4 + data.len());
+        frame.extend_from_slice(&len_prefix);
+        frame.extend_from_slice(data);
+        print!("{label} (u32+{}B): {:02x?}", data.len(), frame);
+        match stream.write_all(&frame) {
+            Ok(()) => { println!(" → OK"); true }
+            Err(e) => { println!(" → 失敗: {e}"); false }
+        }
+    };
+
+    // Helper for u32-framed handshake (key optional, response read as u32)
+    let try_u32_handshake = |stream: &mut UnixStream, key: Option<&[u8]>, label: &str| {
+        println!("  --- {label} ---");
+        if let Some(k) = key {
+            if !send_u32(stream, k, "  key") { return; }
+        }
+        if !send_u32(stream, &[0x0a, 0x02, 0x08, 0x01], "  cmd") { return; }
+
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        // Read response: u32 length prefix (4 bytes)
+        let mut len_buf = [0u8; 4];
+        match stream.read_exact(&mut len_buf) {
+            Ok(()) => {
+                let resp_len = u32::from_le_bytes(len_buf) as usize;
+                println!("  resp_len = {:02x?} → {} bytes", len_buf, resp_len);
+                if resp_len < 65536 {
+                    let mut body = vec![0u8; resp_len];
+                    match stream.read_exact(&mut body) {
+                        Ok(()) => println!("  resp body: {:02x?}", &body[..body.len().min(64)]),
+                        Err(e) => println!("  resp body read failed: {e}"),
+                    }
+                } else {
+                    println!("  resp_len 異常 ({resp_len})");
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                   || e.kind() == std::io::ErrorKind::TimedOut => {
+                println!("  recv: タイムアウト (サーバー応答なし)");
+            }
+            Err(e) => println!("  recv failed: {e}"),
+        }
+    };
+
+    // K1: no key, u32 command
+    if let Some(mut s) = connect_fresh("K1: キーなし u32フレーム") {
+        try_u32_handshake(&mut s, None, "K1: no key, u32 cmd");
+    }
+
+    // K2: 32-byte ASCII key (u32 framed) + u32 command
+    if let Some(ref abs_name) = abs_name_opt {
+        let name = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
+        if let Some(hash) = name.strip_prefix("tmp/.mozc.").and_then(|s| s.strip_suffix(".session")) {
+            let key_c = hash.as_bytes().to_vec();
+            if let Some(mut s) = connect_fresh("K2: hash ASCII キー u32フレーム") {
+                try_u32_handshake(&mut s, Some(&key_c), "K2: ascii key u32");
+            }
+        }
+    }
+
+    // K3: 32-byte key from .session.ipc (u32 framed) + u32 command
+    if let Some(ref k) = ipc_file_key {
+        if let Some(mut s) = connect_fresh("K3: session.ipc key u32フレーム") {
+            try_u32_handshake(&mut s, Some(k), &format!("K3: ipc_file_key u32 ({}B)", k.len()));
         }
     }
 }
