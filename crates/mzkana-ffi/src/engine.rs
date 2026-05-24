@@ -28,9 +28,17 @@ impl Engine {
         let sm = StateMachine::new(layout);
 
         let mozc = match MozcClient::connect(socket_path) {
-            Ok(c) => Some(c),
+            Ok(c) => {
+                eprintln!("[mzkana] Mozc connected (session {})", c.session_id());
+                Some(c)
+            }
             Err(e) => {
-                tracing::warn!("Mozc not available: {e}; running without Mozc");
+                eprintln!("[mzkana] Mozc not available: {e}");
+                eprintln!("[mzkana]   socket tried: {}",
+                    socket_path.map(|p| p.display().to_string())
+                        .unwrap_or_else(|| mzkana_core::mozc::default_socket_path().display().to_string()));
+                eprintln!("[mzkana]   abstract socket: {:?}",
+                    mzkana_core::mozc::find_abstract_socket_name());
                 None
             }
         };
@@ -136,13 +144,13 @@ impl Engine {
         }
         match MozcClient::connect_quick(self.mozc_socket.as_deref()) {
             Ok(c) => {
-                tracing::info!("Mozc reconnected");
+                eprintln!("[mzkana] Mozc reconnected (session {})", c.session_id());
                 self.mozc = Some(c);
                 self.mozc_retry_at = None;
                 true
             }
             Err(e) => {
-                tracing::debug!("Mozc reconnect failed: {e}; retrying in 5s");
+                eprintln!("[mzkana] Mozc reconnect failed: {e}; retrying in 5s");
                 self.mozc_retry_at = Some(now + Duration::from_secs(5));
                 false
             }
