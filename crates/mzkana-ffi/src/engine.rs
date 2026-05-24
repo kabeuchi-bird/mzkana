@@ -176,14 +176,27 @@ impl Engine {
                 }
                 _ => {
                     let result = self.dispatch_to_mozc(action);
-                    // Only consume the key if Mozc was connected (it handled or will handle
-                    // the action) or the fallback returned output (SendKana without Mozc).
-                    // When Mozc is absent and dispatch returned None, let the key pass through.
                     if result.is_some() || self.mozc.is_some() {
+                        // Mozc connected (or SendKana fallback produced output).
                         if let Some(out) = result {
                             self.apply_mozc_output(out, &mut commit);
                         }
                         any_consumed = true;
+                    } else {
+                        // Mozc absent and no fallback output: route as passthrough so the
+                        // key is not silently swallowed.  `consumed = any_consumed ||
+                        // passthrough_key.is_none()`, so we must set passthrough_key to
+                        // make consumed false.
+                        let pt = match action {
+                            OutputAction::Backspace => Some("BackSpace"),
+                            OutputAction::MozcSubmit => Some("Return"),
+                            OutputAction::SendFunctionKey(name) => Some(name.as_str()),
+                            _ => None,
+                        };
+                        if let Some(key) = pt {
+                            tracing::warn!("Mozc absent; passing through as key: {key}");
+                            passthrough_key = Some(key.to_string());
+                        }
                     }
                 }
             }

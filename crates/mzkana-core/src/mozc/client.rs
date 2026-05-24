@@ -123,15 +123,27 @@ fn ensure_mozc_server(timeout: Duration) -> Option<String> {
     };
 
     tracing::info!("mozc_server not running; launching {bin}");
-    let Ok(_) = std::process::Command::new(&bin)
+    let mut child = match std::process::Command::new(&bin)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-    else {
-        tracing::warn!("failed to spawn {bin}");
-        return None;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to spawn {bin}: {e}");
+            return None;
+        }
     };
+
+    // Brief pause then check for immediate exit (wrong binary, permission denied, etc.).
+    std::thread::sleep(Duration::from_millis(50));
+    if let Ok(Some(status)) = child.try_wait() {
+        tracing::warn!("mozc_server ({bin}) exited immediately: {status}");
+        return None;
+    }
+    // Server appears to be running; drop the handle — mozc_server daemonises itself.
+    drop(child);
 
     // Wait for the abstract socket to appear (up to `timeout`).
     let deadline = Instant::now() + timeout;
