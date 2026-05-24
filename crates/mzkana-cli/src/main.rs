@@ -633,6 +633,25 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         }
     }
 
+    // K4: 16-byte binary key (u32 framed) + u32 command.
+    // Hypothesis: stored_key.size() == 16 (binary), and RecvMSG uses u32 framing.
+    // K2/K3 fail because they send uint32(32) but stored key is 16 bytes.
+    if let Some(ref abs_name) = abs_name_opt {
+        let name = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
+        if let Some(hash) = name.strip_prefix("tmp/.mozc.").and_then(|s| s.strip_suffix(".session")) {
+            if hash.len() % 2 == 0 {
+                let key_bin: Vec<u8> = (0..hash.len()).step_by(2)
+                    .filter_map(|i| hash.get(i..i+2).and_then(|s| u8::from_str_radix(s, 16).ok()))
+                    .collect();
+                if key_bin.len() == hash.len() / 2 {
+                    if let Some(mut s) = connect_fresh("K4: 16B バイナリキー u32フレーム") {
+                        try_u32_handshake(&mut s, Some(&key_bin), &format!("K4: binary key u32 ({}B)", key_bin.len()));
+                    }
+                }
+            }
+        }
+    }
+
     // Variants L: raw key bytes (NO length prefix) then u32-framed command.
     // Hypothesis: Mozc reads exactly kIPCKeySize(32) raw bytes for auth, then
     // switches to uint32-framed command loop.
