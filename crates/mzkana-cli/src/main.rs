@@ -295,30 +295,49 @@ fn show_process_files(pid: u32) {
         return;
     };
     let mut found = false;
-    for entry in fds.flatten() {
+    let mut entries: Vec<_> = fds.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             let t = target.to_string_lossy();
-            if !t.starts_with("socket:[") && !t.starts_with("pipe:[") && !t.starts_with("anon_inode:") {
-                println!("    fd {}: {t}", entry.file_name().to_string_lossy());
+            let fd_name = entry.file_name();
+            let fd_str = fd_name.to_string_lossy();
+            if t.starts_with("socket:[") {
+                // Show sockets: resolve inode to Unix socket name via /proc/net/unix
+                let inode = t.trim_start_matches("socket:[").trim_end_matches(']');
+                let sock_name = find_unix_socket_by_inode(inode)
+                    .unwrap_or_else(|| "(TCP/unnamed)".into());
+                println!("    fd {fd_str}: socket inode={inode}  {sock_name}");
                 found = true;
-                // Show small file contents (potential key files)
+            } else if !t.starts_with("pipe:[") && !t.starts_with("anon_inode:") {
+                println!("    fd {fd_str}: {t}");
+                found = true;
                 if let Ok(contents) = std::fs::read(&*t) {
                     if contents.len() <= 256 {
                         println!("      内容 ({} bytes): {:02x?}", contents.len(), contents);
-                        if let Ok(s) = std::str::from_utf8(&contents) {
-                            let s = s.trim_end_matches('\0');
-                            if !s.is_empty() {
-                                println!("      UTF-8: {s:?}");
-                            }
-                        }
                     }
                 }
             }
         }
     }
     if !found {
-        println!("    (通常ファイルなし — ソケット/パイプのみ)");
+        println!("    (fd なし)");
     }
+}
+
+fn find_unix_socket_by_inode(inode: &str) -> Option<String> {
+    let data = std::fs::read_to_string("/proc/net/unix").ok()?;
+    for line in data.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 7 && parts[6] == inode {
+            let name = parts.get(7).copied().unwrap_or("(unnamed)");
+            let state = parts.get(5).copied().unwrap_or("?");
+            // State: 01=LISTEN, 03=CONNECTED, 00=unconnected
+            let state_str = match state { "01" => "LISTEN", "03" => "CONNECTED", "00" => "unconnected", s => s };
+            return Some(format!("{name} [{state_str}]"));
+        }
+    }
+    None
 }
 
 fn cmd_diagnose_mozc(socket: Option<&Path>) {
@@ -726,6 +745,65 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         let path_key = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str()).as_bytes().to_vec();
         if let Some(mut s) = connect_fresh("L3: フルパス名 生 + u32コマンド") {
             try_raw_key_u32_cmd(&mut s, &path_key, &format!("L3: raw path key ({}B)", path_key.len()));
+        }
+    }
+
+    // Variant N: command-only tests with alternate encodings.
+    // N1: BE uint32 framing (0x00000004 instead of 0x04000000)
+    if let Some(mut s) = connect_fresh("N1: BE u32フレーム + コマンド") {
+        println!("  --- N1: big-endian uint32 length prefix ---");
+        let cmd = [0x0a_u8, 0x02, 0x08, 0x01];
+        let len_be = (cmd.len() as u32).to_be_bytes();
+        let mut frame = Vec::with_capacity(4 + cmd.len());
+        frame.extend_from_slice(&len_be);
+        frame.extend_from_slice(&cmd);
+        print!("  cmd (BE u32+4B): {:02x?}", frame);
+        match s.write_all(&frame) {
+            Ok(()) => {
+                println!(" → OK");
+                // Half-close so the server sees EOF and can finalize the response.
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+            Err(e) => { println!(" → 失敗: {e}"); }
+        }
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut len_buf = [0u8; 4];
+        match s.read_exact(&mut len_buf) {
+            Ok(()) => {
+                let rl = u32::from_le_bytes(len_buf) as usize;
+                println!("  resp_len (LE) = {:02x?} → {rl} bytes", len_buf);
+                let rl2 = u32::from_be_bytes(len_buf) as usize;
+                println!("  resp_len (BE) = {rl2} bytes");
+            }
+            Err(e) => println!("  recv failed: {e}"),
+        }
+    }
+
+    // N2: raw Input bytes with u32 LE framing (no Command wrapper)
+    // In case Mozc IPC sends/receives Input directly rather than Command.
+    if let Some(mut s) = connect_fresh("N2: 生Inputバイト u32フレーム（Commandラッパーなし）") {
+        println!("  --- N2: raw Input (no Command wrapper), u32 LE ---");
+        let input = [0x08_u8, 0x01];   // Input { type: CREATE_SESSION=1 }
+        let len = (input.len() as u32).to_le_bytes();
+        let mut frame = Vec::with_capacity(4 + input.len());
+        frame.extend_from_slice(&len);
+        frame.extend_from_slice(&input);
+        print!("  input (u32+2B): {:02x?}", frame);
+        match s.write_all(&frame) {
+            Ok(()) => {
+                println!(" → OK");
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+            Err(e) => { println!(" → 失敗: {e}"); }
+        }
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut len_buf = [0u8; 4];
+        match s.read_exact(&mut len_buf) {
+            Ok(()) => {
+                let rl = u32::from_le_bytes(len_buf) as usize;
+                println!("  resp_len = {:02x?} → {rl} bytes", len_buf);
+            }
+            Err(e) => println!("  recv failed: {e}"),
         }
     }
 

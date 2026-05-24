@@ -1,7 +1,13 @@
+use std::cell::Cell;
 use std::io::{self, Read, Write};
+use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Maximum response size accepted from the Mozc server (1 MiB).
+/// Prevents unbounded memory growth if the server misbehaves.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::FromRawFd;
@@ -14,25 +20,29 @@ use super::proto::{
 };
 use super::MozcOutput;
 
-/// Maximum accepted response frame size (1 MiB).
-const MAX_FRAME_SIZE: usize = 1024 * 1024;
-
 /// Default path to the Mozc server socket (filesystem fallback).
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     PathBuf::from(home).join(".mozc").join("session.sock")
 }
 
-/// On Linux, Mozc uses an abstract namespace Unix socket whose name appears in
-/// /proc/net/unix as `@tmp/.mozc.{hash}.session`.  This function discovers the
-/// name and returns a connected `UnixStream`, or an error if not found.
+/// Return the abstract socket name found in /proc/net/unix, or None.
 #[cfg(target_os = "linux")]
-pub fn connect_mozc_abstract() -> io::Result<UnixStream> {
-    let abs_name = find_abstract_socket_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Mozc abstract socket not found in /proc/net/unix"))?;
+pub fn find_abstract_socket_name() -> Option<String> {
+    let unix_data = std::fs::read_to_string("/proc/net/unix").ok()?;
+    unix_data
+        .lines()
+        .filter_map(|l| l.split_whitespace().last().map(str::to_string))
+        .find(|n| n.starts_with('@') && n.contains(".mozc.") && n.ends_with(".session"))
+}
 
-    // Strip the '@' sentinel to get the actual abstract name bytes.
-    let name = &abs_name[1..];
+#[cfg(not(target_os = "linux"))]
+pub fn find_abstract_socket_name() -> Option<String> { None }
+
+/// Connect to an abstract namespace socket by its `@`-prefixed name.
+#[cfg(target_os = "linux")]
+fn connect_by_abstract_name(abs_name: &str) -> io::Result<UnixStream> {
+    let name = abs_name.strip_prefix('@').unwrap_or(abs_name);
     let name_bytes = name.as_bytes();
     if name_bytes.len() > 107 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "abstract socket name too long"));
@@ -59,28 +69,37 @@ pub fn connect_mozc_abstract() -> io::Result<UnixStream> {
             return Err(err);
         }
 
-        tracing::info!("connected to Mozc abstract socket: {abs_name}");
         Ok(UnixStream::from_raw_fd(fd))
     }
 }
 
-/// Return the abstract socket name found in /proc/net/unix, or None.
-/// Used by diagnostic tooling.
+/// Discover and connect to the Mozc abstract socket.
+/// Used by the CLI and diagnostic tooling; `MozcClient` caches the name internally.
 #[cfg(target_os = "linux")]
-pub fn find_abstract_socket_name() -> Option<String> {
-    let unix_data = std::fs::read_to_string("/proc/net/unix").ok()?;
-    unix_data
-        .lines()
-        .filter_map(|l| l.split_whitespace().last().map(str::to_string))
-        .find(|n| n.starts_with('@') && n.contains(".mozc.") && n.ends_with(".session"))
+pub fn connect_mozc_abstract() -> io::Result<UnixStream> {
+    let abs_name = find_abstract_socket_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Mozc abstract socket not found in /proc/net/unix"))?;
+    tracing::info!("connecting to Mozc abstract socket: {abs_name}");
+    connect_by_abstract_name(&abs_name)
 }
-
-#[cfg(not(target_os = "linux"))]
-pub fn find_abstract_socket_name() -> Option<String> { None }
 
 #[cfg(not(target_os = "linux"))]
 pub fn connect_mozc_abstract() -> io::Result<UnixStream> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "abstract sockets not supported on this platform"))
+}
+
+/// Kept for backward compatibility with diagnostic tooling in mzkana-cli.
+/// The hash in the socket name is NOT a key — authentication is via SO_PEERCRED.
+pub fn ipc_key_from_socket_name(abs_name: &str) -> Option<Vec<u8>> {
+    let name = abs_name.strip_prefix('@').unwrap_or(abs_name);
+    let hash = name.strip_prefix("tmp/.mozc.")?.strip_suffix(".session")?;
+    if hash.len() % 2 != 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..hash.len()).step_by(2)
+        .filter_map(|i| hash.get(i..i+2).and_then(|s| u8::from_str_radix(s, 16).ok()))
+        .collect();
+    if bytes.len() == hash.len() / 2 { Some(bytes) } else { None }
 }
 
 #[derive(Debug)]
@@ -106,95 +125,141 @@ impl std::error::Error for MozcError {}
 impl From<io::Error> for MozcError { fn from(e: io::Error) -> Self { Self::Io(e) } }
 impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::Decode(e) } }
 
-/// Blocking Mozc IPC client over a Unix domain socket.
+/// Blocking Mozc IPC client.
 ///
-/// Wire framing: `u32::to_le_bytes(length) | bytes` in both directions.
-/// The length prefix is 4 bytes, little-endian uint32, matching Mozc's
-/// C++ IPC framing (confirmed by protocol analysis: size_t framing caused
-/// the server to interpret proto bytes as a length and wait 5 s before closing).
+/// Wire protocol (from Mozc's `unix_ipc.cc`):
+///   - NO length framing in either direction.
+///   - Client sends raw serialized `Command` protobuf bytes, then calls
+///     `shutdown(SHUT_WR)` to signal end-of-request.
+///   - Server reads until EOF, processes, sends raw response bytes, then closes.
+///   - Each request uses a fresh connection.
+///   - Authentication is via SO_PEERCRED (kernel UID check on connect), no key exchange.
 ///
-/// Connection sequence (no key exchange required):
-///   1. connect to abstract socket `@tmp/.mozc.{hex}.session`
-///   2. send/receive commands via u32-framed messages
+/// # Thread safety
+///
+/// `MozcClient` is intentionally `!Sync`: `session_id` is mutated in `Drop`
+/// without synchronization. Callers must not share a reference across threads.
+/// Ownership may be moved between threads (`Send` is safe because no raw
+/// pointers or thread-locals are held).
 pub struct MozcClient {
-    stream: UnixStream,
+    /// Explicit filesystem socket path, or None to use abstract socket.
+    socket_path: Option<PathBuf>,
+    /// Cached abstract socket name for reconnections (e.g., "@tmp/.mozc.HASH.session").
+    abstract_name: Option<String>,
     session_id: Option<u64>,
-}
-
-/// Send a raw byte slice using Mozc's `u32 LE`-prefixed framing.
-fn send_msg(stream: &mut UnixStream, data: &[u8]) -> io::Result<()> {
-    let len = u32::try_from(data.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "message too large for u32 frame"))?;
-    let len_prefix = len.to_le_bytes();
-    let mut frame = Vec::with_capacity(4 + data.len());
-    frame.extend_from_slice(&len_prefix);
-    frame.extend_from_slice(data);
-    stream.write_all(&frame)
-}
-
-/// Derive the Mozc IPC key from the abstract socket name.
-/// The socket name is `@tmp/.mozc.{hex_hash}.session`; the hash is the hex
-/// encoding of the 16-byte random key generated by mozc_server.  Clients must
-/// send those 16 raw bytes as the first `SendMSG` to authenticate.
-pub fn ipc_key_from_socket_name(abs_name: &str) -> Option<Vec<u8>> {
-    let name = abs_name.strip_prefix('@').unwrap_or(abs_name);
-    let hash = name.strip_prefix("tmp/.mozc.")?.strip_suffix(".session")?;
-    if hash.len() % 2 != 0 {
-        return None;
-    }
-    let bytes: Vec<u8> = (0..hash.len()).step_by(2)
-        .filter_map(|i| hash.get(i..i+2).and_then(|s| u8::from_str_radix(s, 16).ok()))
-        .collect();
-    if bytes.len() == hash.len() / 2 { Some(bytes) } else { None }
+    /// Makes `MozcClient` explicitly `!Sync` (see type-level docs).
+    _not_sync: PhantomData<Cell<()>>,
 }
 
 impl MozcClient {
-    /// Connect to the Mozc server socket and create a session.
+    /// Connect to the Mozc server and create a session.
     ///
     /// If `socket_path` is given it is used directly (filesystem socket).
     /// Otherwise, on Linux the abstract namespace socket is discovered from
-    /// `/proc/net/unix` first; if that fails, the filesystem fallback path is tried.
+    /// `/proc/net/unix`; if that fails, the filesystem fallback path is tried.
     pub fn connect(socket_path: Option<&Path>) -> Result<Self, MozcError> {
-        let stream = if let Some(path) = socket_path {
-            UnixStream::connect(path)?
+        let (sp, abs) = if let Some(path) = socket_path {
+            (Some(path.to_path_buf()), None)
         } else {
             #[cfg(target_os = "linux")]
-            let stream = connect_mozc_abstract()
-                .or_else(|e| {
-                    tracing::debug!("abstract socket discovery failed ({e}), trying filesystem path");
-                    UnixStream::connect(default_socket_path())
-                })?;
+            {
+                match find_abstract_socket_name() {
+                    Some(name) => {
+                        tracing::info!("found Mozc abstract socket: {name}");
+                        (None, Some(name))
+                    }
+                    None => {
+                        tracing::debug!("abstract socket not found, using filesystem path");
+                        (Some(default_socket_path()), None)
+                    }
+                }
+            }
             #[cfg(not(target_os = "linux"))]
-            let stream = UnixStream::connect(default_socket_path())?;
-            stream
+            { (Some(default_socket_path()), None) }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let mut client = Self { stream, session_id: None };
+
+        let mut client = Self {
+            socket_path: sp,
+            abstract_name: abs,
+            session_id: None,
+            _not_sync: PhantomData,
+        };
+
+        // Verify connection works before returning.
         client.create_session()?;
         Ok(client)
     }
 
-    /// The active session id. Returns 0 only during the drop sequence.
     pub fn session_id(&self) -> u64 {
         self.session_id.unwrap_or(0)
     }
 
-    fn send_recv(&mut self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
-        let cmd_bytes = encode_command(input);
-        send_msg(&mut self.stream, &cmd_bytes)?;
+    /// Open a fresh connection to the Mozc server.
+    ///
+    /// When using an abstract socket, if the cached name fails (e.g. because
+    /// mozc_server restarted and got a new socket name), the function
+    /// rediscovers the current name from `/proc/net/unix` and retries once.
+    fn new_connection(&self) -> io::Result<UnixStream> {
+        let stream = if let Some(ref path) = self.socket_path {
+            UnixStream::connect(path)?
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(ref abs) = self.abstract_name {
+                    match connect_by_abstract_name(abs) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            // Cached name stale (server restarted); rediscover and retry.
+                            let new_name = find_abstract_socket_name().ok_or_else(|| {
+                                io::Error::new(io::ErrorKind::NotFound,
+                                    "Mozc abstract socket not found after reconnect attempt")
+                            })?;
+                            tracing::debug!("abstract socket name changed, reconnecting to {new_name}");
+                            connect_by_abstract_name(&new_name)?
+                        }
+                    }
+                } else {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "no Mozc socket configured"));
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            { return Err(io::Error::new(io::ErrorKind::Unsupported, "abstract sockets unsupported")); }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        Ok(stream)
+    }
 
-        let mut len_buf = [0u8; 4];
-        self.stream.read_exact(&mut len_buf)?;
-        let resp_len = u32::from_le_bytes(len_buf) as usize;
-        if resp_len > MAX_FRAME_SIZE {
-            return Err(MozcError::Protocol(format!(
-                "response frame too large: {resp_len} > {MAX_FRAME_SIZE}"
-            )));
+    /// Send a command and receive the response over a fresh connection.
+    ///
+    /// Protocol: write raw bytes → shutdown(SHUT_WR) → bounded read until EOF
+    /// (server closes after responding). Response is capped at `MAX_RESPONSE_BYTES`.
+    fn send_recv(&self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
+        let mut stream = self.new_connection()?;
+        let cmd_bytes = encode_command(input);
+        stream.write_all(&cmd_bytes)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+
+        let mut resp = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf)? {
+                0 => break,
+                n => {
+                    if resp.len() + n > MAX_RESPONSE_BYTES {
+                        return Err(MozcError::Protocol(format!(
+                            "Mozc response exceeds {MAX_RESPONSE_BYTES} bytes"
+                        )));
+                    }
+                    resp.extend_from_slice(&buf[..n]);
+                }
+            }
         }
-        let mut resp_buf = vec![0u8; resp_len];
-        self.stream.read_exact(&mut resp_buf)?;
-        Ok(decode_response(&resp_buf)?)
+
+        if resp.is_empty() {
+            return Err(MozcError::Protocol("empty response from Mozc server".into()));
+        }
+        Ok(decode_response(&resp)?)
     }
 
     fn create_session(&mut self) -> Result<(), MozcError> {
@@ -210,64 +275,49 @@ impl MozcClient {
         self.session_id.ok_or(MozcError::NotConnected)
     }
 
-    /// Encode `input`, send it, receive the response, and wrap as `MozcOutput`.
-    fn dispatch(&mut self, input: &super::proto::EncodedInput) -> Result<MozcOutput, MozcError> {
+    fn dispatch(&self, input: &super::proto::EncodedInput) -> Result<MozcOutput, MozcError> {
         Ok(MozcOutput::from_decoded(self.send_recv(input)?))
     }
 
-    /// Send a special key code (shared by backspace, space, enter, and function keys).
-    fn send_special_key(&mut self, code: u64) -> Result<MozcOutput, MozcError> {
+    fn send_special_key(&self, code: u64) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         self.dispatch(&input_send_special(sid, code))
     }
 
-    /// Send a kana string to Mozc preedit (DIRECT_INPUT style).
-    pub fn send_kana(&mut self, kana: &str) -> Result<MozcOutput, MozcError> {
+    pub fn send_kana(&self, kana: &str) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         self.dispatch(&input_send_kana(sid, kana))
     }
 
-    /// Send a BackSpace key.
-    pub fn send_backspace(&mut self) -> Result<MozcOutput, MozcError> {
+    pub fn send_backspace(&self) -> Result<MozcOutput, MozcError> {
         self.send_special_key(special_key::BACKSPACE)
     }
 
-    /// Submit (commit) the current preedit.
-    pub fn submit(&mut self) -> Result<MozcOutput, MozcError> {
+    pub fn submit(&self) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         self.dispatch(&input_submit(sid))
     }
 
-    /// Revert (cancel) the current preedit.
-    pub fn revert(&mut self) -> Result<MozcOutput, MozcError> {
+    pub fn revert(&self) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         self.dispatch(&input_revert(sid))
     }
 
-    /// Send a Space key (typically starts conversion).
-    pub fn send_space(&mut self) -> Result<MozcOutput, MozcError> {
+    pub fn send_space(&self) -> Result<MozcOutput, MozcError> {
         self.send_special_key(special_key::SPACE)
     }
 
-    /// Send an Enter key.
-    pub fn send_enter(&mut self) -> Result<MozcOutput, MozcError> {
+    pub fn send_enter(&self) -> Result<MozcOutput, MozcError> {
         self.send_special_key(special_key::ENTER)
     }
 
-    /// Send a function key by its XKB keysym name (e.g. `"Return"`, `"Up"`, `"F1"`).
-    /// Returns `Err(Protocol)` for names that have no Mozc SpecialKey mapping.
-    pub fn send_function_key(&mut self, name: &str) -> Result<MozcOutput, MozcError> {
+    pub fn send_function_key(&self, name: &str) -> Result<MozcOutput, MozcError> {
         let code = xkb_name_to_mozc_special(name)
             .ok_or_else(|| MozcError::Protocol(format!("no Mozc SpecialKey for: {name}")))?;
         self.send_special_key(code)
     }
 
-    /// Send a modifier+key combination to Mozc.
-    ///
-    /// - Function keys (e.g. `"Left"`, `"Return"`): sent as `special_key` + `modifier_keys`.
-    /// - Single ASCII characters (e.g. `"z"`, `"s"`): sent as `key_code` + `modifier_keys`.
-    /// - Anything else: returns `Err(Protocol)` — caller should forward to the application.
-    pub fn send_modified_key(&mut self, key: &str, mods: u8) -> Result<MozcOutput, MozcError> {
+    pub fn send_modified_key(&self, key: &str, mods: u8) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         if let Some(special) = xkb_name_to_mozc_special(key) {
             self.dispatch(&input_send_special_with_mods(sid, special, mods))
@@ -280,7 +330,7 @@ impl MozcClient {
     }
 }
 
-/// Map an XKB keysym name (as used after `!` in layout files) to a Mozc SpecialKey value.
+/// Map an XKB keysym name to a Mozc SpecialKey value.
 pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
     match name {
         "Return"            => Some(special_key::ENTER),
