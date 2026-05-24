@@ -356,28 +356,31 @@ impl MozcClient {
 
     /// Send a command and receive the response over a fresh connection.
     ///
-    /// Protocol: write raw bytes → shutdown(SHUT_WR) → bounded read until EOF
-    /// (server closes after responding). Response is capped at `MAX_RESPONSE_BYTES`.
+    /// Mozc IPC framing (both directions): u32 LE length prefix followed by
+    /// the serialised Command protobuf.  The server reads exactly `len` bytes,
+    /// processes, and writes back `[u32_len][body]`.  No shutdown(SHUT_WR)
+    /// needed — the length prefix tells the server when the message ends.
     fn send_recv(&self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let mut stream = self.new_connection()?;
         let cmd_bytes = encode_command(input);
-        stream.write_all(&cmd_bytes)?;
-        stream.shutdown(std::net::Shutdown::Write)?;
 
-        let mut resp = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match stream.read(&mut buf)? {
-                0 => break,
-                n => {
-                    if resp.len() + n > MAX_RESPONSE_BYTES {
-                        return Err(MozcError::Protocol(format!(
-                            "Mozc response exceeds {MAX_RESPONSE_BYTES} bytes"
-                        )));
-                    }
-                    resp.extend_from_slice(&buf[..n]);
-                }
-            }
+        // Send: [u32 LE length][Command protobuf bytes]
+        let len = (cmd_bytes.len() as u32).to_le_bytes();
+        stream.write_all(&len)?;
+        stream.write_all(&cmd_bytes)?;
+
+        // Receive: [u32 LE length][Output protobuf bytes]
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf)?;
+        let resp_len = u32::from_le_bytes(len_buf) as usize;
+        if resp_len > MAX_RESPONSE_BYTES {
+            return Err(MozcError::Protocol(format!(
+                "Mozc response length {resp_len} exceeds {MAX_RESPONSE_BYTES} bytes"
+            )));
+        }
+        let mut resp = vec![0u8; resp_len];
+        if resp_len > 0 {
+            stream.read_exact(&mut resp)?;
         }
 
         if resp.is_empty() {
