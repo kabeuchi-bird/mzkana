@@ -356,35 +356,39 @@ impl MozcClient {
 
     /// Send a command and receive the response over a fresh connection.
     ///
-    /// Mozc IPC framing (both directions): u32 LE length prefix followed by
-    /// the serialised Command protobuf.  The server reads exactly `len` bytes,
-    /// processes, and writes back `[u32_len][body]`.  No shutdown(SHUT_WR)
-    /// needed — the length prefix tells the server when the message ends.
+    /// Mozc IPC wire protocol (confirmed from `unix_ipc.cc`):
+    ///   - NO length framing in either direction.
+    ///   - Client sends raw `Command` protobuf bytes, then `shutdown(SHUT_WR)`.
+    ///     The shutdown signals end-of-request; without it the server blocks
+    ///     waiting for more data and the call times out.
+    ///   - Server reads until EOF, processes, writes raw `Output` protobuf bytes,
+    ///     then closes the connection.
     fn send_recv(&self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let mut stream = self.new_connection()?;
         let cmd_bytes = encode_command(input);
 
-        // Send: [u32 LE length][Command protobuf bytes]
-        let len = (cmd_bytes.len() as u32).to_le_bytes();
-        stream.write_all(&len)?;
         stream.write_all(&cmd_bytes)?;
+        // Half-close the write side so the server knows the request is complete.
+        stream.shutdown(std::net::Shutdown::Write)?;
 
-        // Receive: [u32 LE length][Output protobuf bytes]
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf)?;
-        let resp_len = u32::from_le_bytes(len_buf) as usize;
-        if resp_len > MAX_RESPONSE_BYTES {
-            return Err(MozcError::Protocol(format!(
-                "Mozc response length {resp_len} exceeds {MAX_RESPONSE_BYTES} bytes"
-            )));
-        }
-        let mut resp = vec![0u8; resp_len];
-        if resp_len > 0 {
-            stream.read_exact(&mut resp)?;
+        // Read raw response bytes until the server closes the connection.
+        let mut resp = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf)? {
+                0 => break,
+                n => resp.extend_from_slice(&buf[..n]),
+            }
         }
 
         if resp.is_empty() {
             return Err(MozcError::Protocol("empty response from Mozc server".into()));
+        }
+        if resp.len() > MAX_RESPONSE_BYTES {
+            return Err(MozcError::Protocol(format!(
+                "Mozc response length {} exceeds {MAX_RESPONSE_BYTES} bytes",
+                resp.len()
+            )));
         }
         Ok(decode_response(&resp)?)
     }
