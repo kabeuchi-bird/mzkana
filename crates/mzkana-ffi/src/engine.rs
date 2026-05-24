@@ -199,14 +199,22 @@ impl Engine {
                     any_consumed = true;
                 }
                 OutputAction::SendModifiedKey { key, mods } => {
-                    let mozc_consumed = self.mozc.as_mut()
-                        .and_then(|mozc| mozc.send_modified_key(key, *mods).ok())
-                        .map(|out| {
+                    let send_result = self.mozc.as_mut()
+                        .map(|mozc| mozc.send_modified_key(key, *mods));
+
+                    let mozc_consumed = match send_result {
+                        Some(Ok(out)) => {
                             let consumed = out.consumed;
                             self.apply_mozc_output(out, &mut commit);
                             consumed
-                        })
-                        .unwrap_or(false);
+                        }
+                        Some(Err(_)) => {
+                            // I/O failure — mark dead so try_reconnect_mozc fires next event.
+                            self.mozc = None;
+                            false
+                        }
+                        None => false,
+                    };
 
                     if !mozc_consumed {
                         forward_key = Some(key.clone());
@@ -237,7 +245,8 @@ impl Engine {
                             }
                         }
                         None if self.mozc.is_some() => {
-                            // Mozc connected but I/O error — consume defensively.
+                            // I/O failure — mark dead so try_reconnect_mozc fires next event.
+                            self.mozc = None;
                             any_consumed = true;
                         }
                         None => {

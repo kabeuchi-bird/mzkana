@@ -109,10 +109,18 @@ fn ensure_mozc_server(timeout: Duration) -> Option<String> {
     if let Some(name) = find_abstract_socket_name() {
         return Some(name);
     }
-    // Filesystem socket exists → server is already up (e.g. launched by fcitx5-mozc).
-    // Don't spawn a second instance; return None so the caller uses the FS path.
-    if default_socket_path().exists() {
-        return None;
+    // Filesystem socket: try to connect to verify liveness rather than just
+    // checking existence — a stale socket from a crashed server would exist
+    // but refuse connections.
+    let fs_path = default_socket_path();
+    if fs_path.exists() {
+        if UnixStream::connect(&fs_path).is_ok() {
+            // Socket is live; return None so the caller uses the FS path.
+            return None;
+        }
+        // Stale socket — remove it and fall through to spawn mozc_server.
+        tracing::debug!("stale Mozc socket at {}; removing", fs_path.display());
+        let _ = std::fs::remove_file(&fs_path);
     }
 
     // Find the binary: well-known paths first, then PATH search.
