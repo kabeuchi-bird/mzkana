@@ -24,6 +24,7 @@ void MzkanaFcitxEngine::tryInitEngine() {
     engine_ = mzkana_engine_create(defaultConfigPath().c_str(), nullptr);
     // engine_ may still be null if the layout file doesn't exist yet; retry
     // on the next keyEvent or activate call.
+    mozcAvailable_ = engine_ && mzkana_engine_mozc_available(engine_);
 }
 
 MzkanaFcitxEngine::~MzkanaFcitxEngine() {
@@ -89,8 +90,15 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
 }
 
 void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
-                                   fcitx::InputContextEvent & /*event*/) {
+                                   fcitx::InputContextEvent &event) {
     tryInitEngine();
+    // Refresh Mozc availability (may have changed since last activation).
+    bool nowAvailable = engine_ && mzkana_engine_mozc_available(engine_);
+    if (nowAvailable != mozcAvailable_) {
+        mozcAvailable_ = nowAvailable;
+    }
+    event.inputContext()->updateUserInterface(
+        fcitx::UserInterfaceComponent::StatusArea);
 }
 
 void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry &entry,
@@ -142,6 +150,16 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
             ic->forwardKey(fcitx::Key(sym, states));
         }
     }
+}
+
+std::string MzkanaFcitxEngine::subMode(const fcitx::InputMethodEntry &,
+                                        fcitx::InputContext &) {
+    return mozcAvailable_ ? "（Mozc）" : "（変換エンジン未起動）";
+}
+
+std::string MzkanaFcitxEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
+                                                  fcitx::InputContext &) {
+    return mozcAvailable_ ? "MzKana（Mozc）" : "Mzkana（変換エンジン未起動）";
 }
 
 void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {

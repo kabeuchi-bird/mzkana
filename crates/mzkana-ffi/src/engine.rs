@@ -109,6 +109,10 @@ impl Engine {
         self.dispatch_actions(actions, false)
     }
 
+    pub fn mozc_available(&self) -> bool {
+        self.mozc.is_some()
+    }
+
     pub fn reset(&mut self) {
         self.sm.reset();
         if let Some(ref mut mozc) = self.mozc {
@@ -175,10 +179,29 @@ impl Engine {
                     any_consumed = true;
                 }
                 _ => {
-                    if let Some(out) = self.dispatch_to_mozc(action) {
-                        self.apply_mozc_output(out, &mut commit);
+                    let result = self.dispatch_to_mozc(action);
+                    if result.is_some() || self.mozc.is_some() {
+                        // Mozc connected (or SendKana fallback produced output).
+                        if let Some(out) = result {
+                            self.apply_mozc_output(out, &mut commit);
+                        }
+                        any_consumed = true;
+                    } else {
+                        // Mozc absent and no fallback output: route as passthrough so the
+                        // key is not silently swallowed.  `consumed = any_consumed ||
+                        // passthrough_key.is_none()`, so we must set passthrough_key to
+                        // make consumed false.
+                        let pt = match action {
+                            OutputAction::Backspace => Some("BackSpace"),
+                            OutputAction::MozcSubmit => Some("Return"),
+                            OutputAction::SendFunctionKey(name) => Some(name.as_str()),
+                            _ => None,
+                        };
+                        if let Some(key) = pt {
+                            tracing::warn!("Mozc absent; passing through as key: {key}");
+                            passthrough_key = Some(key.to_string());
+                        }
                     }
-                    any_consumed = true;
                 }
             }
         }
@@ -188,14 +211,26 @@ impl Engine {
     }
 
     fn dispatch_to_mozc(&mut self, action: &OutputAction) -> Option<MozcOutput> {
-        let mozc = self.mozc.as_mut()?;
-        match action {
-            OutputAction::SendKana(s) => mozc.send_kana(s).ok(),
-            OutputAction::Backspace => mozc.send_backspace().ok(),
-            OutputAction::MozcSubmit => mozc.submit().ok(),
-            OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).ok(),
-            _ => None,
+        if let Some(ref mut mozc) = self.mozc {
+            return match action {
+                OutputAction::SendKana(s) => mozc.send_kana(s).ok(),
+                OutputAction::Backspace => mozc.send_backspace().ok(),
+                OutputAction::MozcSubmit => mozc.submit().ok(),
+                OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).ok(),
+                _ => None,
+            };
         }
+        // Mozc not connected: commit kana directly so raw kana input still works.
+        if let OutputAction::SendKana(s) = action {
+            return Some(MozcOutput {
+                preedit: String::new(),
+                result: Some(s.clone()),
+                is_converting: false,
+                mode: 0,
+                consumed: true,
+            });
+        }
+        None
     }
 
     fn apply_mozc_output(&mut self, out: MozcOutput, commit: &mut Option<String>) {

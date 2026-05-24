@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Maximum response size accepted from the Mozc server (1 MiB).
 /// Prevents unbounded memory growth if the server misbehaves.
@@ -88,6 +88,78 @@ pub fn connect_mozc_abstract() -> io::Result<UnixStream> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "abstract sockets not supported on this platform"))
 }
 
+/// Known paths for the mozc_server binary on common Linux distributions.
+static MOZC_SERVER_PATHS: &[&str] = &[
+    "/usr/lib/mozc/mozc_server",
+    "/usr/lib64/mozc/mozc_server",
+    "/usr/local/lib/mozc/mozc_server",
+];
+
+/// Try to start mozc_server if it is not already running.
+///
+/// Searches well-known installation paths and PATH, spawns the server if found,
+/// then waits up to `timeout` for the abstract socket to appear in
+/// `/proc/net/unix`.  Returns the abstract socket name on success.
+///
+/// `timeout` should be kept short (≤ 500 ms) because this is called from the
+/// fcitx5 main event thread during `Engine::new`.
+#[cfg(target_os = "linux")]
+fn ensure_mozc_server(timeout: Duration) -> Option<String> {
+    // Server already running?
+    if let Some(name) = find_abstract_socket_name() {
+        return Some(name);
+    }
+
+    // Find the binary: well-known paths first, then PATH search.
+    let bin: String = if let Some(&known) = MOZC_SERVER_PATHS.iter()
+        .find(|p| std::fs::metadata(p).is_ok())
+    {
+        known.to_string()
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|d| d.join("mozc_server"))
+            .find(|p| p.exists())
+            .and_then(|p| p.into_os_string().into_string().ok())?
+    };
+
+    tracing::info!("mozc_server not running; launching {bin}");
+    let mut child = match std::process::Command::new(&bin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to spawn {bin}: {e}");
+            return None;
+        }
+    };
+
+    // Brief pause then check for immediate exit (wrong binary, permission denied, etc.).
+    std::thread::sleep(Duration::from_millis(50));
+    if let Ok(Some(status)) = child.try_wait() {
+        tracing::warn!("mozc_server ({bin}) exited immediately: {status}");
+        // 抽象ソケットが少し遅れて現れる可能性があるので待機は継続する。
+    }
+    // Server appears to be running; drop the handle — mozc_server daemonises itself.
+    drop(child);
+
+    // Wait for the abstract socket to appear (up to `timeout`).
+    let deadline = Instant::now() + timeout;
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        if let Some(name) = find_abstract_socket_name() {
+            tracing::info!("mozc_server started; socket: {name}");
+            return Some(name);
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!("timed out waiting for mozc_server to start");
+            return None;
+        }
+    }
+}
+
 /// Kept for backward compatibility with diagnostic tooling in mzkana-cli.
 /// The hash in the socket name is NOT a key — authentication is via SO_PEERCRED.
 pub fn ipc_key_from_socket_name(abs_name: &str) -> Option<Vec<u8>> {
@@ -163,13 +235,15 @@ impl MozcClient {
         } else {
             #[cfg(target_os = "linux")]
             {
-                match find_abstract_socket_name() {
+                // Auto-start mozc_server if not running (waits up to 500 ms to avoid
+                // blocking the fcitx5 main event thread for too long).
+                match ensure_mozc_server(Duration::from_millis(500)) {
                     Some(name) => {
-                        tracing::info!("found Mozc abstract socket: {name}");
+                        tracing::info!("Mozc abstract socket: {name}");
                         (None, Some(name))
                     }
                     None => {
-                        tracing::debug!("abstract socket not found, using filesystem path");
+                        tracing::debug!("Mozc abstract socket not found; trying filesystem path");
                         (Some(default_socket_path()), None)
                     }
                 }
