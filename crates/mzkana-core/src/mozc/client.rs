@@ -123,7 +123,9 @@ pub struct MozcClient {
 
 /// Send a raw byte slice using Mozc's `u32 LE`-prefixed framing.
 fn send_msg(stream: &mut UnixStream, data: &[u8]) -> io::Result<()> {
-    let len_prefix = (data.len() as u32).to_le_bytes();
+    let len = u32::try_from(data.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "message too large for u32 frame"))?;
+    let len_prefix = len.to_le_bytes();
     let mut frame = Vec::with_capacity(4 + data.len());
     frame.extend_from_slice(&len_prefix);
     frame.extend_from_slice(data);
