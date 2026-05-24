@@ -31,9 +31,16 @@ public:
     void reset(const fcitx::InputMethodEntry &entry,
                fcitx::InputContextEvent &event) override;
 
+    std::string subMode(const fcitx::InputMethodEntry &entry,
+                        fcitx::InputContext &ic) override;
+
+    std::string subModeLabelImpl(const fcitx::InputMethodEntry &entry,
+                                 fcitx::InputContext &ic) override;
+
 private:
     fcitx::Instance *instance_;
     MzkanaEngine *engine_ = nullptr;
+    bool mozcAvailable_ = false;
 
     std::string defaultConfigPath() const;
     void tryInitEngine();

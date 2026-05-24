@@ -239,3 +239,18 @@ pub unsafe extern "C" fn mzkana_engine_check_reload(engine: *mut MzkanaEngine) -
         .map(|e| e.0.check_reload() as u8)
         .unwrap_or(0)
 }
+
+/// Returns 1 if the Mozc conversion engine is connected, 0 otherwise.
+///
+/// Use this to determine the current engine state for UI display (e.g. status
+/// area labels).
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_mozc_available(engine: *const MzkanaEngine) -> u8 {
+    engine
+        .as_ref()
+        .map(|e| e.0.mozc_available() as u8)
+        .unwrap_or(0)
+}

@@ -132,4 +132,15 @@ void mzkana_engine_reset(struct MzkanaEngine *engine);
  */
 uint8_t mzkana_engine_check_reload(struct MzkanaEngine *engine);
 
+/**
+ * Returns 1 if the Mozc conversion engine is connected, 0 otherwise.
+ *
+ * Use this to determine the current engine state for UI display (e.g. status
+ * area labels).
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+uint8_t mzkana_engine_mozc_available(const struct MzkanaEngine *engine);
+
 #endif  /* MZKANA_H */

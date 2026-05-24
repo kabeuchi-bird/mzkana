@@ -109,6 +109,10 @@ impl Engine {
         self.dispatch_actions(actions, false)
     }
 
+    pub fn mozc_available(&self) -> bool {
+        self.mozc.is_some()
+    }
+
     pub fn reset(&mut self) {
         self.sm.reset();
         if let Some(ref mut mozc) = self.mozc {
