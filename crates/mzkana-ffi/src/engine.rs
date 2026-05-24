@@ -188,14 +188,26 @@ impl Engine {
     }
 
     fn dispatch_to_mozc(&mut self, action: &OutputAction) -> Option<MozcOutput> {
-        let mozc = self.mozc.as_mut()?;
-        match action {
-            OutputAction::SendKana(s) => mozc.send_kana(s).ok(),
-            OutputAction::Backspace => mozc.send_backspace().ok(),
-            OutputAction::MozcSubmit => mozc.submit().ok(),
-            OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).ok(),
-            _ => None,
+        if let Some(ref mut mozc) = self.mozc {
+            return match action {
+                OutputAction::SendKana(s) => mozc.send_kana(s).ok(),
+                OutputAction::Backspace => mozc.send_backspace().ok(),
+                OutputAction::MozcSubmit => mozc.submit().ok(),
+                OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).ok(),
+                _ => None,
+            };
         }
+        // Mozc not connected: commit kana directly so raw kana input still works.
+        if let OutputAction::SendKana(s) = action {
+            return Some(MozcOutput {
+                preedit: String::new(),
+                result: Some(s.clone()),
+                is_converting: false,
+                mode: 0,
+                consumed: true,
+            });
+        }
+        None
     }
 
     fn apply_mozc_output(&mut self, out: MozcOutput, commit: &mut Option<String>) {
