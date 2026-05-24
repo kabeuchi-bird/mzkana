@@ -175,10 +175,16 @@ impl Engine {
                     any_consumed = true;
                 }
                 _ => {
-                    if let Some(out) = self.dispatch_to_mozc(action) {
-                        self.apply_mozc_output(out, &mut commit);
+                    let result = self.dispatch_to_mozc(action);
+                    // Only consume the key if Mozc was connected (it handled or will handle
+                    // the action) or the fallback returned output (SendKana without Mozc).
+                    // When Mozc is absent and dispatch returned None, let the key pass through.
+                    if result.is_some() || self.mozc.is_some() {
+                        if let Some(out) = result {
+                            self.apply_mozc_output(out, &mut commit);
+                        }
+                        any_consumed = true;
                     }
-                    any_consumed = true;
                 }
             }
         }

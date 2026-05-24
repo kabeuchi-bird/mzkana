@@ -97,9 +97,12 @@ static MOZC_SERVER_PATHS: &[&str] = &[
 
 /// Try to start mozc_server if it is not already running.
 ///
-/// Searches well-known installation paths, then waits up to `timeout` for the
-/// abstract socket to appear in `/proc/net/unix`.  Returns the abstract socket
-/// name on success.
+/// Searches well-known installation paths and PATH, spawns the server if found,
+/// then waits up to `timeout` for the abstract socket to appear in
+/// `/proc/net/unix`.  Returns the abstract socket name on success.
+///
+/// `timeout` should be kept short (≤ 500 ms) because this is called from the
+/// fcitx5 main event thread during `Engine::new`.
 #[cfg(target_os = "linux")]
 fn ensure_mozc_server(timeout: Duration) -> Option<String> {
     // Server already running?
@@ -107,22 +110,20 @@ fn ensure_mozc_server(timeout: Duration) -> Option<String> {
         return Some(name);
     }
 
-    // Find the binary.
-    let bin = MOZC_SERVER_PATHS.iter()
+    // Find the binary: well-known paths first, then PATH search.
+    let bin: String = if let Some(&known) = MOZC_SERVER_PATHS.iter()
         .find(|p| std::fs::metadata(p).is_ok())
-        .copied()
-        .or_else(|| {
-            // Also try PATH via `which`-equivalent.
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .map(|d| d.join("mozc_server"))
-                .find(|p| p.exists())
-                .and_then(|p| p.to_str().map(str::to_string))
-                .as_deref()
-                .map(|_| "mozc_server")   // placeholder; handled below
-        })?;
+    {
+        known.to_string()
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|d| d.join("mozc_server"))
+            .find(|p| p.exists())
+            .and_then(|p| p.into_os_string().into_string().ok())?
+    };
 
     tracing::info!("mozc_server not running; launching {bin}");
-    let Ok(_) = std::process::Command::new(bin)
+    let Ok(_) = std::process::Command::new(&bin)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -135,7 +136,7 @@ fn ensure_mozc_server(timeout: Duration) -> Option<String> {
     // Wait for the abstract socket to appear (up to `timeout`).
     let deadline = Instant::now() + timeout;
     loop {
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
         if let Some(name) = find_abstract_socket_name() {
             tracing::info!("mozc_server started; socket: {name}");
             return Some(name);
@@ -222,8 +223,9 @@ impl MozcClient {
         } else {
             #[cfg(target_os = "linux")]
             {
-                // Auto-start mozc_server if not running (waits up to 3 seconds).
-                match ensure_mozc_server(Duration::from_secs(3)) {
+                // Auto-start mozc_server if not running (waits up to 500 ms to avoid
+                // blocking the fcitx5 main event thread for too long).
+                match ensure_mozc_server(Duration::from_millis(500)) {
                     Some(name) => {
                         tracing::info!("Mozc abstract socket: {name}");
                         (None, Some(name))
