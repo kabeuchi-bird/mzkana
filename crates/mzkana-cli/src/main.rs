@@ -709,6 +709,33 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
             try_raw_key_u32_cmd(&mut s, &path_key, &format!("L3: raw path key ({}B)", path_key.len()));
         }
     }
+
+    // Variant M: read-first — does the server send a challenge/greeting immediately?
+    if let Some(mut s) = connect_fresh("M: 接続後サーバー初回送信を待機") {
+        println!("  --- M: 接続後に何も送らずサーバーの初回メッセージを最大3秒待機 ---");
+        let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut buf = [0u8; 256];
+        match s.read(&mut buf) {
+            Ok(0) => println!("  M: サーバーが接続を即時クローズ"),
+            Ok(n)  => {
+                println!("  M: サーバーが先に {}B 送信: {:02x?}", n, &buf[..n]);
+                println!("  M: ASCII: {:?}", String::from_utf8_lossy(&buf[..n]));
+                // Try to read more
+                let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                let mut buf2 = [0u8; 256];
+                if let Ok(n2) = s.read(&mut buf2) {
+                    if n2 > 0 {
+                        println!("  M (続き): {}B: {:02x?}", n2, &buf2[..n2]);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                   || e.kind() == std::io::ErrorKind::TimedOut => {
+                println!("  M: 3秒待機してもサーバーから送信なし → クライアント先送りプロトコル");
+            }
+            Err(e) => println!("  M: read error: {e}"),
+        }
+    }
 }
 
 fn cmd_schema() {
