@@ -1,7 +1,13 @@
+use std::cell::Cell;
 use std::io::{self, Read, Write};
+use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Maximum response size accepted from the Mozc server (1 MiB).
+/// Prevents unbounded memory growth if the server misbehaves.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::FromRawFd;
@@ -126,14 +132,23 @@ impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::D
 ///   - Client sends raw serialized `Command` protobuf bytes, then calls
 ///     `shutdown(SHUT_WR)` to signal end-of-request.
 ///   - Server reads until EOF, processes, sends raw response bytes, then closes.
-///   - Each request uses a fresh TCP connection.
+///   - Each request uses a fresh connection.
 ///   - Authentication is via SO_PEERCRED (kernel UID check on connect), no key exchange.
+///
+/// # Thread safety
+///
+/// `MozcClient` is intentionally `!Sync`: `session_id` is mutated in `Drop`
+/// without synchronization. Callers must not share a reference across threads.
+/// Ownership may be moved between threads (`Send` is safe because no raw
+/// pointers or thread-locals are held).
 pub struct MozcClient {
     /// Explicit filesystem socket path, or None to use abstract socket.
     socket_path: Option<PathBuf>,
     /// Cached abstract socket name for reconnections (e.g., "@tmp/.mozc.HASH.session").
     abstract_name: Option<String>,
     session_id: Option<u64>,
+    /// Makes `MozcClient` explicitly `!Sync` (see type-level docs).
+    _not_sync: PhantomData<Cell<()>>,
 }
 
 impl MozcClient {
@@ -163,7 +178,12 @@ impl MozcClient {
             { (Some(default_socket_path()), None) }
         };
 
-        let mut client = Self { socket_path: sp, abstract_name: abs, session_id: None };
+        let mut client = Self {
+            socket_path: sp,
+            abstract_name: abs,
+            session_id: None,
+            _not_sync: PhantomData,
+        };
 
         // Verify connection works before returning.
         client.create_session()?;
@@ -175,6 +195,10 @@ impl MozcClient {
     }
 
     /// Open a fresh connection to the Mozc server.
+    ///
+    /// When using an abstract socket, if the cached name fails (e.g. because
+    /// mozc_server restarted and got a new socket name), the function
+    /// rediscovers the current name from `/proc/net/unix` and retries once.
     fn new_connection(&self) -> io::Result<UnixStream> {
         let stream = if let Some(ref path) = self.socket_path {
             UnixStream::connect(path)?
@@ -182,7 +206,18 @@ impl MozcClient {
             #[cfg(target_os = "linux")]
             {
                 if let Some(ref abs) = self.abstract_name {
-                    connect_by_abstract_name(abs)?
+                    match connect_by_abstract_name(abs) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            // Cached name stale (server restarted); rediscover and retry.
+                            let new_name = find_abstract_socket_name().ok_or_else(|| {
+                                io::Error::new(io::ErrorKind::NotFound,
+                                    "Mozc abstract socket not found after reconnect attempt")
+                            })?;
+                            tracing::debug!("abstract socket name changed, reconnecting to {new_name}");
+                            connect_by_abstract_name(&new_name)?
+                        }
+                    }
                 } else {
                     return Err(io::Error::new(io::ErrorKind::NotFound, "no Mozc socket configured"));
                 }
@@ -197,14 +232,30 @@ impl MozcClient {
 
     /// Send a command and receive the response over a fresh connection.
     ///
-    /// Protocol: write raw bytes → shutdown(SHUT_WR) → read_to_end (server closes after responding).
+    /// Protocol: write raw bytes → shutdown(SHUT_WR) → bounded read until EOF
+    /// (server closes after responding). Response is capped at `MAX_RESPONSE_BYTES`.
     fn send_recv(&self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let mut stream = self.new_connection()?;
         let cmd_bytes = encode_command(input);
         stream.write_all(&cmd_bytes)?;
         stream.shutdown(std::net::Shutdown::Write)?;
+
         let mut resp = Vec::new();
-        stream.read_to_end(&mut resp)?;
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf)? {
+                0 => break,
+                n => {
+                    if resp.len() + n > MAX_RESPONSE_BYTES {
+                        return Err(MozcError::Protocol(format!(
+                            "Mozc response exceeds {MAX_RESPONSE_BYTES} bytes"
+                        )));
+                    }
+                    resp.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+
         if resp.is_empty() {
             return Err(MozcError::Protocol("empty response from Mozc server".into()));
         }

@@ -759,7 +759,11 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         frame.extend_from_slice(&cmd);
         print!("  cmd (BE u32+4B): {:02x?}", frame);
         match s.write_all(&frame) {
-            Ok(()) => println!(" → OK"),
+            Ok(()) => {
+                println!(" → OK");
+                // Half-close so the server sees EOF and can finalize the response.
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
             Err(e) => { println!(" → 失敗: {e}"); }
         }
         let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
@@ -786,7 +790,10 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         frame.extend_from_slice(&input);
         print!("  input (u32+2B): {:02x?}", frame);
         match s.write_all(&frame) {
-            Ok(()) => println!(" → OK"),
+            Ok(()) => {
+                println!(" → OK");
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
             Err(e) => { println!(" → 失敗: {e}"); }
         }
         let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
