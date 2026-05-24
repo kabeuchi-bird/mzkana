@@ -632,6 +632,83 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
             try_u32_handshake(&mut s, Some(k), &format!("K3: ipc_file_key u32 ({}B)", k.len()));
         }
     }
+
+    // Variants L: raw key bytes (NO length prefix) then u32-framed command.
+    // Hypothesis: Mozc reads exactly kIPCKeySize(32) raw bytes for auth, then
+    // switches to uint32-framed command loop.
+    let send_raw = |stream: &mut UnixStream, data: &[u8], label: &str| -> bool {
+        print!("{label} ({} bytes raw): {:02x?}", data.len(), data);
+        match stream.write_all(data) {
+            Ok(()) => { println!(" → OK"); true }
+            Err(e) => { println!(" → 失敗: {e}"); false }
+        }
+    };
+
+    let try_raw_key_u32_cmd = |stream: &mut UnixStream, key: &[u8], label: &str| {
+        println!("  --- {label} ---");
+        if !send_raw(stream, key, "  key (raw)") { return; }
+        if !send_u32(stream, &[0x0a, 0x02, 0x08, 0x01], "  cmd") { return; }
+
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut len_buf = [0u8; 4];
+        match stream.read_exact(&mut len_buf) {
+            Ok(()) => {
+                let resp_len = u32::from_le_bytes(len_buf) as usize;
+                println!("  resp_len = {:02x?} → {} bytes", len_buf, resp_len);
+                if resp_len < 65536 {
+                    let mut body = vec![0u8; resp_len];
+                    match stream.read_exact(&mut body) {
+                        Ok(()) => println!("  resp body: {:02x?}", &body[..body.len().min(64)]),
+                        Err(e) => println!("  resp body read failed: {e}"),
+                    }
+                } else {
+                    println!("  resp_len 異常 ({resp_len})");
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                   || e.kind() == std::io::ErrorKind::TimedOut => {
+                println!("  recv: タイムアウト");
+            }
+            Err(e) => println!("  recv failed: {e}"),
+        }
+    };
+
+    // L1: 32-byte ASCII hash (raw, no framing) + u32 command
+    if let Some(ref abs_name) = abs_name_opt {
+        let name = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
+        if let Some(hash) = name.strip_prefix("tmp/.mozc.").and_then(|s| s.strip_suffix(".session")) {
+            let key_ascii = hash.as_bytes().to_vec();
+            if let Some(mut s) = connect_fresh("L1: hash ASCII 32B 生 + u32コマンド") {
+                try_raw_key_u32_cmd(&mut s, &key_ascii, &format!("L1: raw ASCII key ({}B)", key_ascii.len()));
+            }
+        }
+    }
+
+    // L2: 16-byte binary key (raw, no framing) + u32 command
+    if let Some(ref abs_name) = abs_name_opt {
+        let name = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str());
+        if let Some(hash) = name.strip_prefix("tmp/.mozc.").and_then(|s| s.strip_suffix(".session")) {
+            if hash.len() % 2 == 0 {
+                let key_bin: Vec<u8> = (0..hash.len()).step_by(2)
+                    .filter_map(|i| hash.get(i..i+2).and_then(|s| u8::from_str_radix(s, 16).ok()))
+                    .collect();
+                if key_bin.len() == hash.len() / 2 {
+                    if let Some(mut s) = connect_fresh("L2: binary 16B 生 + u32コマンド") {
+                        try_raw_key_u32_cmd(&mut s, &key_bin, &format!("L2: raw binary key ({}B)", key_bin.len()));
+                    }
+                }
+            }
+        }
+    }
+
+    // L3: full socket path name (raw, no framing) + u32 command
+    // Some Mozc builds use the full path as the IPC key.
+    if let Some(ref abs_name) = abs_name_opt {
+        let path_key = abs_name.strip_prefix('@').unwrap_or(abs_name.as_str()).as_bytes().to_vec();
+        if let Some(mut s) = connect_fresh("L3: フルパス名 生 + u32コマンド") {
+            try_raw_key_u32_cmd(&mut s, &path_key, &format!("L3: raw path key ({}B)", path_key.len()));
+        }
+    }
 }
 
 fn cmd_schema() {
