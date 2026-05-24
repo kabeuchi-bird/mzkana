@@ -391,17 +391,24 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
             if !send_raw(stream, k, "  key(raw)") { return; }
         }
 
-        // After sending key, wait briefly to see if server responds before CREATE_SESSION
+        // After sending key, wait briefly to see if server responds before CREATE_SESSION.
+        // Bytes read here are stashed into `got` so the recv loop below sees them too.
         let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
-        let mut peeked = [0u8; 32];
-        match stream.read(&mut peeked) {
-            Ok(0) => { println!("  [key後] EOF"); return; }
-            Ok(n) => println!("  [key後] サーバーから {} bytes: {:02x?}", n, &peeked[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                   || e.kind() == std::io::ErrorKind::TimedOut => {
-                println!("  [key後] 応答なし (正常)");
+        let mut got = Vec::new();
+        {
+            let mut peeked = [0u8; 32];
+            match stream.read(&mut peeked) {
+                Ok(0) => { println!("  [key後] EOF"); return; }
+                Ok(n) => {
+                    println!("  [key後] サーバーから {} bytes: {:02x?}", n, &peeked[..n]);
+                    got.extend_from_slice(&peeked[..n]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                       || e.kind() == std::io::ErrorKind::TimedOut => {
+                    println!("  [key後] 応答なし (正常)");
+                }
+                Err(e) => { println!("  [key後] エラー: {e}"); return; }
             }
-            Err(e) => { println!("  [key後] エラー: {e}"); return; }
         }
 
         // Send CREATE_SESSION with size_t framing
@@ -410,7 +417,6 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
 
         // Read response byte-by-byte to capture any partial data before EOF
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-        let mut got = Vec::new();
         loop {
             let mut b = [0u8; 1];
             match stream.read(&mut b) {
@@ -432,18 +438,53 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
         }
     };
 
-    // Read IPC key from .session.ipc file (protobuf field 1)
+    // Read IPC key from .session.ipc file (protobuf field 1, wire type 2).
+    // Decodes LEB128 varints and scans past any leading fields to find field_number=1,wire=2.
     let ipc_file_key: Option<Vec<u8>> = {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
         let path = std::path::PathBuf::from(&home).join(".config/mozc/.session.ipc");
         std::fs::read(&path).ok().and_then(|data| {
-            // Parse: 0a <len> <bytes> ...
-            if data.len() >= 2 && data[0] == 0x0a {
-                let field_len = data[1] as usize;
-                if data.len() >= 2 + field_len {
-                    Some(data[2..2 + field_len].to_vec())
-                } else { None }
-            } else { None }
+            // Decode a varint (LEB128) from `buf[pos..]`; returns (value, new_pos) or None.
+            fn read_varint(buf: &[u8], mut pos: usize) -> Option<(u64, usize)> {
+                let mut val: u64 = 0;
+                let mut shift = 0u32;
+                loop {
+                    let b = *buf.get(pos)?;
+                    pos += 1;
+                    val |= ((b & 0x7f) as u64) << shift;
+                    if b & 0x80 == 0 { return Some((val, pos)); }
+                    shift += 7;
+                    if shift >= 64 { return None; }
+                }
+            }
+            // Walk the protobuf fields looking for field 1, wire type 2 (LEN).
+            let mut pos = 0;
+            while pos < data.len() {
+                let (tag, next) = read_varint(&data, pos)?;
+                pos = next;
+                let field_number = tag >> 3;
+                let wire_type = tag & 0x7;
+                match wire_type {
+                    2 => { // LEN: varint length followed by that many bytes
+                        let (len, next) = read_varint(&data, pos)?;
+                        pos = next;
+                        let end = pos + len as usize;
+                        if end > data.len() { return None; }
+                        if field_number == 1 {
+                            return Some(data[pos..end].to_vec());
+                        }
+                        pos = end;
+                    }
+                    0 => { // VARINT: skip
+                        let (_, next) = read_varint(&data, pos)?;
+                        pos = next;
+                    }
+                    1 => { pos += 8; } // 64-bit: skip
+                    5 => { pos += 4; } // 32-bit: skip
+                    _ => return None,
+                }
+            }
+            None
         })
     };
     if let Some(ref k) = ipc_file_key {
@@ -487,11 +528,10 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
                 try_handshake(&mut s, Some(&key_c), None, &format!("C: hash {}B framed", key_c.len()));
             }
 
-            // Variant D: hex-decoded 16 bytes, size_t framed
-            let key_d: Vec<u8> = (0..hash.len()).step_by(2)
-                .filter_map(|i| hash.get(i..i+2).and_then(|s| u8::from_str_radix(s, 16).ok()))
-                .collect();
-            if hash.len() % 2 == 0 && key_d.len() == hash.len() / 2 {
+            // Variant D: hex-decoded raw bytes via the shared helper, size_t framed
+            let key_d: Vec<u8> = mzkana_core::mozc::ipc_key_from_socket_name(abs_name)
+                .unwrap_or_default();
+            if !key_d.is_empty() {
                 if let Some(mut s) = connect_fresh("D: 16B 生キー (size_t framed)") {
                     try_handshake(&mut s, Some(&key_d), None, &format!("D: raw {:02x?}", &key_d));
                 }
@@ -502,8 +542,8 @@ fn cmd_diagnose_mozc(socket: Option<&Path>) {
                 try_handshake(&mut s, None, Some(key_c.as_slice()), "E: hash raw (no framing)");
             }
 
-            // Variant F: hex-decoded 16 bytes, NO framing
-            if hash.len() % 2 == 0 && key_d.len() == hash.len() / 2 {
+            // Variant F: hex-decoded raw bytes, NO framing
+            if !key_d.is_empty() {
                 if let Some(mut s) = connect_fresh("F: 16B 生キー (フレームなし)") {
                     try_handshake(&mut s, None, Some(&key_d), "F: raw bytes no framing");
                 }
