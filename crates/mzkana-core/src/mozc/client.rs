@@ -108,22 +108,25 @@ impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::D
 
 /// Blocking Mozc IPC client over a Unix domain socket.
 ///
-/// Wire framing per `SendMSG`/`RecvMSG` in Mozc's C++ IPC:
-///   `usize::to_ne_bytes(length) | bytes`  (size_t, native byte order)
+/// Wire framing: `u32::to_le_bytes(length) | bytes` in both directions.
+/// The length prefix is 4 bytes, little-endian uint32, matching Mozc's
+/// C++ IPC framing (confirmed by protocol analysis: size_t framing caused
+/// the server to interpret proto bytes as a length and wait 5 s before closing).
 ///
-/// Connection sequence:
-///   1. connect to abstract socket `@tmp/.mozc.{hex16}.session`
-///   2. send IPC key = 16 raw bytes (hex-decoded from the socket name hash) via SendMSG
-///   3. send/receive commands via SendMSG/RecvMSG
+/// Connection sequence (no key exchange required):
+///   1. connect to abstract socket `@tmp/.mozc.{hex}.session`
+///   2. send/receive commands via u32-framed messages
 pub struct MozcClient {
     stream: UnixStream,
     session_id: Option<u64>,
 }
 
-/// Send a raw byte slice using Mozc's `size_t`-prefixed framing.
+/// Send a raw byte slice using Mozc's `u32 LE`-prefixed framing.
 fn send_msg(stream: &mut UnixStream, data: &[u8]) -> io::Result<()> {
-    let len_prefix = data.len().to_ne_bytes();
-    let mut frame = Vec::with_capacity(len_prefix.len() + data.len());
+    let len = u32::try_from(data.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "message too large for u32 frame"))?;
+    let len_prefix = len.to_le_bytes();
+    let mut frame = Vec::with_capacity(4 + data.len());
     frame.extend_from_slice(&len_prefix);
     frame.extend_from_slice(data);
     stream.write_all(&frame)
@@ -152,12 +155,6 @@ impl MozcClient {
     /// Otherwise, on Linux the abstract namespace socket is discovered from
     /// `/proc/net/unix` first; if that fails, the filesystem fallback path is tried.
     pub fn connect(socket_path: Option<&Path>) -> Result<Self, MozcError> {
-        // Discover the abstract socket name so we can derive the IPC key from it.
-        #[cfg(target_os = "linux")]
-        let abs_name = find_abstract_socket_name();
-        #[cfg(not(target_os = "linux"))]
-        let abs_name: Option<String> = None;
-
         let stream = if let Some(path) = socket_path {
             UnixStream::connect(path)?
         } else {
@@ -174,21 +171,6 @@ impl MozcClient {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut client = Self { stream, session_id: None };
-
-        // Mozc IPC authentication: send the 16-byte IPC key (hex-decoded from the
-        // socket name hash) as the first SendMSG before any commands.
-        if let Some(ref name) = abs_name {
-            match ipc_key_from_socket_name(name) {
-                Some(ref key_bytes) => {
-                    send_msg(&mut client.stream, key_bytes)?;
-                    tracing::debug!("sent IPC key ({} bytes)", key_bytes.len());
-                }
-                None => {
-                    tracing::warn!("could not derive IPC key from socket name: {name}");
-                }
-            }
-        }
-
         client.create_session()?;
         Ok(client)
     }
@@ -202,9 +184,9 @@ impl MozcClient {
         let cmd_bytes = encode_command(input);
         send_msg(&mut self.stream, &cmd_bytes)?;
 
-        let mut len_buf = [0u8; std::mem::size_of::<usize>()];
+        let mut len_buf = [0u8; 4];
         self.stream.read_exact(&mut len_buf)?;
-        let resp_len = usize::from_ne_bytes(len_buf);
+        let resp_len = u32::from_le_bytes(len_buf) as usize;
         if resp_len > MAX_FRAME_SIZE {
             return Err(MozcError::Protocol(format!(
                 "response frame too large: {resp_len} > {MAX_FRAME_SIZE}"
