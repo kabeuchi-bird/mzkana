@@ -140,7 +140,7 @@ fn ensure_mozc_server(timeout: Duration) -> Option<String> {
     std::thread::sleep(Duration::from_millis(50));
     if let Ok(Some(status)) = child.try_wait() {
         tracing::warn!("mozc_server ({bin}) exited immediately: {status}");
-        return None;
+        // 抽象ソケットが少し遅れて現れる可能性があるので待機は継続する。
     }
     // Server appears to be running; drop the handle — mozc_server daemonises itself.
     drop(child);
