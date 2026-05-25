@@ -356,11 +356,11 @@ impl MozcClient {
 
     /// Send a command and receive the response over a fresh connection.
     ///
-    /// Mozc IPC wire protocol (confirmed from `unix_ipc.cc`):
+    /// Mozc IPC wire protocol (confirmed from `unix_ipc.cc` and `session_server.cc`):
     ///   - NO length framing in either direction.
-    ///   - Client sends raw `Command` protobuf bytes, then `shutdown(SHUT_WR)`.
-    ///     The shutdown signals end-of-request; without it the server blocks
-    ///     waiting for more data and the call times out.
+    ///   - Client sends raw `Input` protobuf bytes (via `encode_command`), then
+    ///     `shutdown(SHUT_WR)`.  The shutdown signals end-of-request; without it
+    ///     the server blocks waiting for more data and the call times out.
     ///   - Server reads until EOF, processes, writes raw `Output` protobuf bytes,
     ///     then closes the connection.
     fn send_recv(&self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
@@ -372,23 +372,27 @@ impl MozcClient {
         stream.shutdown(std::net::Shutdown::Write)?;
 
         // Read raw response bytes until the server closes the connection.
+        // Bail out early if the accumulated length would exceed MAX_RESPONSE_BYTES
+        // to avoid buffering an unboundedly large Vec on a misbehaving server.
         let mut resp = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
             match stream.read(&mut buf)? {
                 0 => break,
-                n => resp.extend_from_slice(&buf[..n]),
+                n => {
+                    if resp.len() + n > MAX_RESPONSE_BYTES {
+                        return Err(MozcError::Protocol(format!(
+                            "Mozc response length {} exceeds {MAX_RESPONSE_BYTES} bytes",
+                            resp.len() + n
+                        )));
+                    }
+                    resp.extend_from_slice(&buf[..n]);
+                }
             }
         }
 
         if resp.is_empty() {
             return Err(MozcError::Protocol("empty response from Mozc server".into()));
-        }
-        if resp.len() > MAX_RESPONSE_BYTES {
-            return Err(MozcError::Protocol(format!(
-                "Mozc response length {} exceeds {MAX_RESPONSE_BYTES} bytes",
-                resp.len()
-            )));
         }
         Ok(decode_response(&resp)?)
     }
