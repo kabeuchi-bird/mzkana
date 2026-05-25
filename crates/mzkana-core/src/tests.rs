@@ -1401,14 +1401,12 @@ mod codec_tests {
         use crate::mozc::proto::{encode_command, input_send_kana};
         let encoded = encode_command(&input_send_kana(1234, "あ"));
         assert!(!encoded.is_empty());
-        // Command.input = field 1
+        // encode_command returns raw Input bytes (no Command wrapper).
         let fields = decode(&encoded).unwrap();
-        let input_bytes = find_bytes(&fields, 1).expect("Command.input missing");
-        let input_fields = decode(input_bytes).unwrap();
         // Input.type = SEND_KEY (3)
-        assert_eq!(find_varint(&input_fields, 1), Some(3));
+        assert_eq!(find_varint(&fields, 1), Some(3), "Input.type should be SEND_KEY=3");
         // Input.id = 1234
-        assert_eq!(find_varint(&input_fields, 2), Some(1234));
+        assert_eq!(find_varint(&fields, 2), Some(1234), "Input.id should be 1234");
     }
 
     /// Build a Command{output: Output{...}} with preedit segments (including HIGHLIGHT)
@@ -1448,12 +1446,10 @@ mod codec_tests {
         write_len_field(&mut output_msg, 4, &result_msg);        // result
         write_len_field(&mut output_msg, 5, &preedit_msg);       // preedit
 
-        // ── Build Command { output = field 2 } ───────────────────────────
-        let mut command_msg = Vec::new();
-        write_len_field(&mut command_msg, 2, &output_msg);
+        // decode_response expects raw Output bytes (no Command wrapper).
 
         // ── Decode and verify ─────────────────────────────────────────────
-        let out = decode_response(&command_msg).expect("decode_response failed");
+        let out = decode_response(&output_msg).expect("decode_response failed");
         assert_eq!(out.session_id, Some(42));
         assert_eq!(out.mode, 1); // HIRAGANA
         assert!(out.consumed);
