@@ -19,8 +19,8 @@ pub mod cmd {
 
 /// SessionCommand.CommandType
 pub mod session_cmd {
+    pub const REVERT: u64 = 1;
     pub const SUBMIT: u64 = 2;
-    pub const REVERT: u64 = 6;
 }
 
 /// KeyEvent.SpecialKey
@@ -79,11 +79,12 @@ pub mod annotation {
 
 // ── Encoding ─────────────────────────────────────────────────────────────────
 
-/// Encode a `Command { input: Input { type, id?, key?, command? } }`.
+/// Encode a Mozc IPC request.
+///
+/// Mozc IPC uses raw `Input` protobuf bytes on the wire — NOT a `Command` wrapper.
+/// Confirmed from strace: the server expects plain `Input { type, id?, key?, command? }`.
 pub fn encode_command(input: &EncodedInput) -> Vec<u8> {
-    let mut cmd = Vec::new();
-    write_len_field(&mut cmd, 1, &input.0);
-    cmd
+    input.0.clone()
 }
 
 /// A pre-encoded `Input` message ready to be wrapped in `Command`.
@@ -201,43 +202,34 @@ pub struct DecodedOutput {
     pub preedit_has_highlight: bool,
 }
 
-/// Decode a `Command` response received from the Mozc server.
-/// Extracts the `output` sub-message and decodes it into `DecodedOutput`.
+/// Decode a Mozc IPC response into `DecodedOutput`.
+///
+/// Mozc sends raw `Output` protobuf bytes on the wire — NOT a `Command` wrapper.
+/// Confirmed from strace: `Output { id=1, mode=2, consumed=3, result=4, preedit=5 }`.
 pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::DecodeError> {
-    let cmd_fields = decode(data)?;
-
-    // Command.output = field 2
-    let out_fields = match find_msg(&cmd_fields, 2)? {
-        Some(f) => f,
-        None => {
-            // No output field: fallback for unexpected responses
-            return Ok(DecodedOutput {
-                session_id: find_varint(&cmd_fields, 1),
-                ..Default::default()
-            });
-        }
-    };
+    // Response is a raw Output message (not wrapped in Command).
+    let out_fields = decode(data)?;
 
     let mut out = DecodedOutput {
-        session_id: find_varint(&out_fields, 1),
-        mode: find_varint(&out_fields, 2).unwrap_or(0) as i32,
-        consumed: find_varint(&out_fields, 3).map(|v| v != 0).unwrap_or(false),
+        session_id: find_varint(&out_fields, 1),       // Output.id
+        mode: find_varint(&out_fields, 2).unwrap_or(0) as i32, // Output.mode
+        consumed: find_varint(&out_fields, 3).map(|v| v != 0).unwrap_or(false), // Output.consumed
         ..Default::default()
     };
-    // Output.result = 4
+    // Output.result = field 4
     if let Some(result_fields) = find_msg(&out_fields, 4)? {
-        // Result.value = 2
+        // Result.value = field 2
         if let Some(val) = find_bytes(&result_fields, 2) {
             out.result_value = String::from_utf8(val.to_vec()).ok();
         }
     }
+    // Output.preedit = field 5
     if let Some(pre_fields) = find_msg(&out_fields, 5)? {
-        // Preedit.Segment is a proto2 group at field 2; annotation=3, value=4
+        // Preedit.Segment is repeated at field 2; annotation=3, value=4
         let segs = find_all_msg(&pre_fields, 2)?;
         let mut preedit = String::new();
         for seg in &segs {
             if let Some(v) = find_bytes(seg, 4) {
-                // Avoid Cow allocation on the common valid-UTF-8 path
                 match std::str::from_utf8(v) {
                     Ok(s) => preedit.push_str(s),
                     Err(_) => preedit.push_str(&String::from_utf8_lossy(v)),
