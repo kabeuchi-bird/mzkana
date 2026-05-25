@@ -9,10 +9,12 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 - **6 つのシフト方式に対応** — 通常シフト / 同時シフト / 前置シフト / 後置シフト / 相互シフト / センターシフト
 - **漢直サポート** — T-code / TUT-code など 2 ストローク漢字直接入力に対応
 - **投機的送信** — 入力をリアルタイムに Mozc へ送り、後から確定・書き換え（BS-rewrite）
-- **Mozc IPC クライアント** — Unix ドメインソケット経由で mozc_server に直接接続
+- **Mozc IPC クライアント** — Unix ドメインソケット経由で mozc_server に直接接続。起動していなければ自動起動し、切断時は次のキーイベントで自動再接続
 - **機能キー出力** — `!Return` / `!Tab` など機能キーをグリッドや chord に埋め込み可能
+- **修飾キー記法** — `C-z`（Ctrl+z）/ `S-!Left`（Shift+左）などを出力トークンとして指定可能
 - **エイリアス / 複数トークン出力** — `[[alias]]` で名前付きシーケンスを定義し、グリッドや chord から参照
 - **Fcitx5 アドオン** — C++ シムレイヤー経由でインライン preedit・コミット・ホットリロードに対応
+- **Mozc ステータス表示** — Fcitx5 ステータスバーに「MzKana（Mozc）」／「Mzkana（変換エンジン未起動）」を表示
 
 ## リポジトリ構成
 
@@ -255,6 +257,9 @@ output   = "日"
 | `あ` | そのかな文字を送信 |
 | `＿` | 空セル（割り当てなし） |
 | `!Return` | 機能キー `Return` を送信 |
+| `C-z` | Ctrl+z を送信（Mozc 経由；消費されなければアプリへ転送） |
+| `S-!Left` | Shift+左矢印を送信（変換中は文節区切り調整） |
+| `S-C-s` | 修飾子は重ねて指定可能（`S-` / `C-` / `A-` / `M-`） |
 | `"、 !Return"` | 複数トークンを順番に送信（引用符で囲む） |
 | `ku_ret` | `[[alias]]` で定義した名前を参照 |
 
@@ -274,14 +279,38 @@ output   = "日"
 `Prior` / `Next` / `PageUp` / `PageDown` /
 `F1`–`F12` / `space` / `Henkan` / `Muhenkan` / `Hiragana_Katakana`
 
+### 修飾キー記法
+
+修飾プレフィックスを `!` キー名またはプレーンキーの前に付けます。プレフィックスは重ねられます。
+
+| プレフィックス | 修飾キー |
+|---|---|
+| `S-` | Shift |
+| `C-` | Ctrl |
+| `A-` | Alt |
+| `M-` | Super（Meta） |
+
+```toml
+# 例
+output = "C-z"        # Ctrl+z（アプリ Undo またはMozc Undo）
+output = "S-!Left"    # Shift+左矢印（Mozc 変換中は文節縮小）
+output = "S-C-s"      # Shift+Ctrl+s
+output = "A-!F4"      # Alt+F4
+```
+
+修飾キーは Mozc 経由で送信されます。Mozc が消費した場合（変換中のカーソル移動など）はそのまま preedit を更新し、消費されなかった場合はアプリケーションへ転送（`ic->forwardKey()`）します。
+
 ## Mozc IPC について
 
 `mzkana-core` は Mozc の `commands.proto` を使って `mozc_server` と直接通信します。
 
-- **接続先**: `~/.mozc/server.sock`（`--socket` で変更可）
-- **プロトコル**: `uint32_le(メッセージ長) + protobuf バイト列`（双方向）
+- **接続先**: Linux 抽象ソケット（`/proc/net/unix` から自動検出）、フォールバックとして `~/.mozc/session.sock`（`--socket` で変更可）
+- **プロトコル**: raw `Input` protobuf バイト列を送信 → `shutdown(SHUT_WR)` で終端通知 → raw `Output` protobuf バイト列を EOF まで受信（長さプレフィックスなし、`unix_ipc.cc` / `session_server.cc` で確認済み）
+- **認証**: SO_PEERCRED によるカーネル UID 照合（mozc_server が同 UID かを検証）
 - **外部依存**: prost / protoc 不要（Mozc の proto2 group 型に対応した独自コーデックを内蔵）
 - **セッション管理**: 接続時に `CREATE_SESSION`、切断時に `DELETE_SESSION` を自動実行
+- **自動起動**: `mozc_server` が未起動の場合、`/usr/lib/mozc/mozc_server` などを検索して自動起動（最大 500 ms 待機）
+- **自動再接続**: 切断検出後、次のキーイベントで 5 秒バックオフ付きで再接続を試みる
 
 ## Fcitx5 アドオンのアーキテクチャ
 
@@ -293,17 +322,22 @@ fcitx5-mzkana.so  (C++, InputMethodEngineV2)
     │  key_name + shift フラグに正規化
     ▼
 libmzkana.so  (Rust FFI, mzkana-ffi)
-    │  MzkanaResult { consumed, preedit, commit, passthrough_key }
+    │  MzkanaResult { consumed, preedit, commit,
+    │                 passthrough_key,
+    │                 forward_key, forward_mods }
     ▼
 MzkanaEngine  (mzkana-core)
     ├─ 状態機械（シフト / chord / 漢直）
-    └─ Mozc IPC クライアント（preedit 同期・投機的送信）
+    └─ Mozc IPC クライアント（preedit 同期・投機的送信・自動再接続）
 ```
 
 - `mzkana_engine_key_down` / `mzkana_engine_key_up` — キーイベントを処理し `MzkanaResult` を返す
 - `mzkana_engine_tick` — chord ウィンドウタイマーを進める
 - `mzkana_engine_check_reload` — inotify でレイアウトファイルの変更を検出し自動リロード
 - `mzkana_engine_reset` — フォーカス喪失・IM 切り替え時に状態をリセット
+- `mzkana_engine_mozc_available` — Mozc 接続状態を返す（ステータスバー表示に使用）
+
+`forward_key` / `forward_mods` は修飾キートークン（`C-z` 等）が Mozc に消費されなかった場合に設定され、C++ 層が `ic->forwardKey()` でアプリへ転送します。
 
 ## 実装フェーズ
 
@@ -320,7 +354,7 @@ MzkanaEngine  (mzkana-core)
 cargo test
 ```
 
-65 件のテストがあります。Mozc のインストールは不要です。
+71 件のテストがあります。Mozc のインストールは不要です。
 
 ## ライセンス
 
