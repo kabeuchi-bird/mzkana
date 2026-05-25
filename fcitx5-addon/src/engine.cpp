@@ -166,7 +166,7 @@ std::string MzkanaFcitxEngine::subMode(const fcitx::InputMethodEntry &,
 
 std::string MzkanaFcitxEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
                                                   fcitx::InputContext &) {
-    return mozcAvailable_ ? "MzKana（Mozc）" : "Mzkana（変換エンジン未起動）";
+    return mozcAvailable_ ? "MzKana（Mozc）" : "MzKana（変換エンジン未起動）";
 }
 
 void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {

@@ -404,9 +404,11 @@ impl MozcClient {
             .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?;
         self.session_id = Some(sid);
         // New sessions start in DIRECT mode; switch to HIRAGANA so DIRECT_INPUT kana works.
-        let _ = self.send_recv(&input_switch_composition_mode(
+        if let Err(e) = self.send_recv(&input_switch_composition_mode(
             sid, composition_mode::HIRAGANA as u64,
-        ));
+        )) {
+            eprintln!("[mzkana] SWITCH_COMPOSITION_MODE failed: {e}; preedit may not work");
+        }
         Ok(())
     }
 

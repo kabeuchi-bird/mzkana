@@ -14,7 +14,7 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 - **修飾キー記法** — `C-z`（Ctrl+z）/ `S-!Left`（Shift+左）などを出力トークンとして指定可能
 - **エイリアス / 複数トークン出力** — `[[alias]]` で名前付きシーケンスを定義し、グリッドや chord から参照
 - **Fcitx5 アドオン** — C++ シムレイヤー経由でインライン preedit・コミット・ホットリロードに対応
-- **Mozc ステータス表示** — Fcitx5 ステータスバーに「MzKana（Mozc）」／「Mzkana（変換エンジン未起動）」を表示
+- **Mozc ステータス表示** — Fcitx5 ステータスバーに「MzKana（Mozc）」／「MzKana（変換エンジン未起動）」を表示
 
 ## リポジトリ構成
 
@@ -158,7 +158,7 @@ cargo run -p mzkana-cli -- mozc-run layouts/naginata-v17.toml --keys "k a s d"
 
 # Mozc ソケットのパスを明示する場合
 cargo run -p mzkana-cli -- mozc-run layouts/naginata-v17.toml \
-    --socket ~/.mozc/server.sock --keys "k a s d"
+    --socket ~/.mozc/session.sock --keys "k a s d"
 
 # JSON Schema を出力（エディタの補完設定に利用）
 cargo run -p mzkana-cli -- schema
