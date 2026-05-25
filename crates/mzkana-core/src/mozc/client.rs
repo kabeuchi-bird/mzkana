@@ -402,12 +402,17 @@ impl MozcClient {
         let out = self.send_recv(&input_create_session())?;
         let sid = out.session_id
             .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?;
+        eprintln!("[mzkana] CREATE_SESSION → session_id={sid}");
         self.session_id = Some(sid);
         // New sessions start in DIRECT mode; switch to HIRAGANA so DIRECT_INPUT kana works.
-        if let Err(e) = self.send_recv(&input_switch_composition_mode(
+        match self.send_recv(&input_switch_composition_mode(
             sid, composition_mode::HIRAGANA as u64,
         )) {
-            eprintln!("[mzkana] SWITCH_COMPOSITION_MODE failed: {e}; preedit may not work");
+            Ok(out) => eprintln!(
+                "[mzkana] SWITCH_COMPOSITION_MODE(HIRAGANA) → consumed={} mode={} preedit={:?}",
+                out.consumed, out.mode, out.preedit_text
+            ),
+            Err(e) => eprintln!("[mzkana] SWITCH_COMPOSITION_MODE failed: {e}; preedit may not work"),
         }
         Ok(())
     }
@@ -427,7 +432,15 @@ impl MozcClient {
 
     pub fn send_kana(&self, kana: &str) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
-        self.dispatch(&input_send_kana(sid, kana))
+        let result = self.dispatch(&input_send_kana(sid, kana));
+        match &result {
+            Ok(out) => eprintln!(
+                "[mzkana] send_kana({kana:?}) → consumed={} preedit={:?} result={:?} mode={}",
+                out.consumed, out.preedit, out.result, out.mode
+            ),
+            Err(e) => eprintln!("[mzkana] send_kana({kana:?}) FAILED: {e}"),
+        }
+        result
     }
 
     pub fn send_backspace(&self) -> Result<MozcOutput, MozcError> {
