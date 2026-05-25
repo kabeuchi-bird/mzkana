@@ -21,7 +21,9 @@ pub mod cmd {
 pub mod session_cmd {
     pub const REVERT: u64 = 1;
     pub const SUBMIT: u64 = 2;
+    #[allow(dead_code)]
     pub const SWITCH_COMPOSITION_MODE: u64 = 5;
+    pub const TURN_ON_IME: u64 = 22;
 }
 
 /// KeyEvent.SpecialKey
@@ -100,12 +102,30 @@ pub fn input_create_session() -> EncodedInput {
 
 /// Build a SEND_COMMAND / SWITCH_COMPOSITION_MODE input.
 ///
-/// New Mozc sessions start in DIRECT mode; this switches them to kana-input mode.
+/// Only works when the IME is already ON (use `input_turn_on_ime` to activate).
 /// `mode` should be a `composition_mode` constant (e.g. `composition_mode::HIRAGANA`).
+#[allow(dead_code)]
 pub fn input_switch_composition_mode(session_id: u64, mode: u64) -> EncodedInput {
     let mut sc = Vec::new();
     write_varint_field(&mut sc, 1, session_cmd::SWITCH_COMPOSITION_MODE); // SessionCommand.type
     write_varint_field(&mut sc, 3, mode);                                   // SessionCommand.composition_mode
+
+    let mut buf = Vec::new();
+    write_varint_field(&mut buf, 1, cmd::SEND_COMMAND);
+    write_varint_field(&mut buf, 2, session_id);
+    write_len_field(&mut buf, 4, &sc);
+    EncodedInput(buf)
+}
+
+/// Build a SEND_COMMAND / TURN_ON_IME input.
+///
+/// TURN_ON_IME transitions the session from IME-OFF (Direct) to the specified
+/// composition mode.  New sessions start IME-OFF; this call is required before
+/// kana input will be consumed by Mozc.
+pub fn input_turn_on_ime(session_id: u64, mode: u64) -> EncodedInput {
+    let mut sc = Vec::new();
+    write_varint_field(&mut sc, 1, session_cmd::TURN_ON_IME);  // SessionCommand.type
+    write_varint_field(&mut sc, 3, mode);                       // SessionCommand.composition_mode
 
     let mut buf = Vec::new();
     write_varint_field(&mut buf, 1, cmd::SEND_COMMAND);
