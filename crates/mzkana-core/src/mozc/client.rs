@@ -14,9 +14,10 @@ use std::os::unix::io::FromRawFd;
 
 use super::codec::DecodeError;
 use super::proto::{
-    decode_response, encode_command, input_create_session, input_delete_session,
-    input_revert, input_send_kana, input_send_key_code_with_mods, input_send_special,
-    input_send_special_with_mods, input_submit, special_key, DecodedOutput,
+    composition_mode, decode_response, encode_command, input_create_session,
+    input_delete_session, input_revert, input_send_kana, input_send_key_code_with_mods,
+    input_send_special, input_send_special_with_mods, input_submit,
+    input_switch_composition_mode, special_key, DecodedOutput,
 };
 use super::MozcOutput;
 
@@ -399,10 +400,13 @@ impl MozcClient {
 
     fn create_session(&mut self) -> Result<(), MozcError> {
         let out = self.send_recv(&input_create_session())?;
-        self.session_id = Some(
-            out.session_id
-                .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?,
-        );
+        let sid = out.session_id
+            .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?;
+        self.session_id = Some(sid);
+        // New sessions start in DIRECT mode; switch to HIRAGANA so DIRECT_INPUT kana works.
+        let _ = self.send_recv(&input_switch_composition_mode(
+            sid, composition_mode::HIRAGANA as u64,
+        ));
         Ok(())
     }
 
