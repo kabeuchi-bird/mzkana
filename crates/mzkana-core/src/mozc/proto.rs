@@ -262,17 +262,19 @@ pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::Decod
     }
     // Output.preedit = field 5
     if let Some(pre_fields) = find_msg(&out_fields, 5)? {
-        // Preedit.Segment is repeated at field 2; annotation=3, value=4
+        // Preedit.Segment repeated at field 2.
+        // Segment: annotation=field 1 (varint), value=field 2 (bytes),
+        //          value_length=field 3, key=field 4 (optional).
         let segs = find_all_msg(&pre_fields, 2)?;
         let mut preedit = String::new();
         for seg in &segs {
-            if let Some(v) = find_bytes(seg, 4) {
+            if let Some(v) = find_bytes(seg, 2) {
                 match std::str::from_utf8(v) {
                     Ok(s) => preedit.push_str(s),
                     Err(_) => preedit.push_str(&String::from_utf8_lossy(v)),
                 }
             }
-            if !out.preedit_has_highlight && find_varint(seg, 3) == Some(annotation::HIGHLIGHT) {
+            if !out.preedit_has_highlight && find_varint(seg, 1) == Some(annotation::HIGHLIGHT) {
                 out.preedit_has_highlight = true;
             }
         }
