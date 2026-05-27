@@ -142,11 +142,15 @@ pub fn input_delete_session(session_id: u64) -> EncodedInput {
     EncodedInput(buf)
 }
 
-/// Build a SEND_KEY input sending a kana string with `DIRECT_INPUT` style.
+/// Build a SEND_KEY input sending a kana string with `FOLLOW_MODE` style.
+///
+/// `DIRECT_INPUT` (2) causes Mozc to bypass preedit and commit the string directly.
+/// `FOLLOW_MODE` (0) with key_string inserts the kana into the composition buffer
+/// (preedit) in HIRAGANA mode, enabling conversion with the space key.
 pub fn input_send_kana(session_id: u64, kana: &str) -> EncodedInput {
     let mut key = Vec::new();
-    write_len_field(&mut key, 5, kana.as_bytes());          // key_string = 5
-    write_varint_field(&mut key, 6, input_style::DIRECT_INPUT); // input_style = 6
+    write_len_field(&mut key, 5, kana.as_bytes());            // key_string = 5
+    write_varint_field(&mut key, 6, input_style::FOLLOW_MODE); // input_style = 6
 
     let mut buf = Vec::new();
     write_varint_field(&mut buf, 1, cmd::SEND_KEY);          // type = 1
