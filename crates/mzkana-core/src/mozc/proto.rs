@@ -62,6 +62,7 @@ pub mod input_style {
     /// Key value follows current input mode.
     pub const FOLLOW_MODE: u64 = 0;
     /// Send key_string directly as-is (kana direct input).
+    #[allow(dead_code)]
     pub const DIRECT_INPUT: u64 = 2;
 }
 
