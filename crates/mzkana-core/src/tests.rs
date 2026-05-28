@@ -1575,3 +1575,98 @@ save = "S-C-s"
         "alias containing modifier key token must expand correctly, got {actions:?}"
     );
 }
+
+// ── C4: Unassigned key routing during composition ──────────────────────────────
+
+#[test]
+fn c4_unassigned_control_key_during_composition() {
+    // Space is a control key; during composition it should be sent to Mozc
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. 1
+. a
+1 あ
+"""
+"#;
+    let mut m = sm(toml);
+    // Press 'a' to start composition
+    let actions = press_seq(&mut m, &["a"]);
+    assert!(
+        actions.iter().any(|a| matches!(a, OutputAction::SendKana(_))),
+        "pressing 'a' should start composition"
+    );
+    // Now press space (unassigned but a control key)
+    let now = Instant::now();
+    let actions = m.process(InputEvent::down("space"), now);
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("space".to_string())),
+        "unassigned control key during composition should be SendFunctionKey, got {actions:?}"
+    );
+}
+
+#[test]
+fn c4_unassigned_non_control_key_during_composition() {
+    // x is not a control key; during composition it should submit then passthrough
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. 1
+. a
+1 あ
+"""
+"#;
+    let mut m = sm(toml);
+    // Press 'a' to start composition
+    let actions = press_seq(&mut m, &["a"]);
+    assert!(
+        actions.iter().any(|a| matches!(a, OutputAction::SendKana(_))),
+        "pressing 'a' should start composition"
+    );
+    // Now press 'x' (unassigned, not a control key)
+    let now = Instant::now();
+    let actions = m.process(InputEvent::down("x"), now);
+    assert!(
+        actions.contains(&OutputAction::SubmitThenPassthrough("x".to_string())),
+        "unassigned non-control key during composition should be SubmitThenPassthrough, got {actions:?}"
+    );
+}
+
+#[test]
+fn c4_unassigned_key_outside_composition() {
+    // Outside composition, unassigned keys should just passthrough
+    let toml = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. 1
+. a
+1 あ
+"""
+"#;
+    let mut m = sm(toml);
+    // Without any composition, press unassigned key 'x'
+    let now = Instant::now();
+    let actions = m.process(InputEvent::down("x"), now);
+    assert!(
+        actions.contains(&OutputAction::Passthrough("x".to_string())),
+        "unassigned key outside composition should be Passthrough, got {actions:?}"
+    );
+}
