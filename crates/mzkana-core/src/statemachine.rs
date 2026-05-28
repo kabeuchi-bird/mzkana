@@ -57,6 +57,9 @@ pub enum OutputAction {
     SubmitAndCommit(String),
     /// Pass the key through to the application unchanged
     Passthrough(String),
+    /// Submit current Mozc preedit, then pass the key through to the application.
+    /// Used for unassigned keys during active composition (C4).
+    SubmitThenPassthrough(String),
     /// Notify Mozc that conversion is complete (e.g. Enter)
     MozcSubmit,
     /// Send a function/control key (e.g. Return, Tab, Up) bypassing Mozc preedit.
@@ -74,6 +77,15 @@ pub const MOD_SHIFT: u8 = 0x01;
 pub const MOD_CTRL:  u8 = 0x02;
 pub const MOD_ALT:   u8 = 0x04;
 pub const MOD_SUPER: u8 = 0x08;
+
+/// Mozc control/editing keys (C4).
+/// Keys in this set are sent to Mozc during composition for conversion/navigation.
+/// Keys NOT in this set, when pressed during composition, trigger SubmitThenPassthrough.
+const MOZC_CONTROL_KEYS: &[&str] = &[
+    "space", "Return", "Tab", "Left", "Right", "Up", "Down",
+    "Home", "End", "Prior", "Next", "Delete", "Escape",
+    "Henkan", "Muhenkan", "Hiragana_Katakana",
+];
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
@@ -396,8 +408,24 @@ impl StateMachine {
             // need the key here.
             if !has_timed_chord && !has_mutual_chord {
                 self.pending_keys.pop();
-                // Key has no mapping and cannot start a chord — pass through to application.
-                return vec![OutputAction::Passthrough(key.to_string())];
+
+                // C4: Key routing for unassigned keys during composition.
+                // Check if we're actively composing (have sent kana to Mozc).
+                let is_composing = !self.tentative_buffer.is_empty() || self.mozc_mode == MozcMode::Conversion;
+
+                if is_composing {
+                    // During active composition, route the key based on type:
+                    // - Control keys (space, Return, etc.) → SendFunctionKey (send to Mozc)
+                    // - Other keys → SubmitThenPassthrough (confirm preedit, then pass to app)
+                    if Self::is_mozc_control_key(key) {
+                        return vec![OutputAction::SendFunctionKey(key.to_string())];
+                    } else {
+                        return vec![OutputAction::SubmitThenPassthrough(key.to_string())];
+                    }
+                } else {
+                    // Not composing: pass through to application
+                    return vec![OutputAction::Passthrough(key.to_string())];
+                }
             }
             return actions;
         };
@@ -881,6 +909,13 @@ impl StateMachine {
             || token.starts_with("C-")
             || token.starts_with("A-")
             || token.starts_with("M-")
+    }
+
+    /// Check if a key is a Mozc control/editing key (C4).
+    /// These keys are sent to Mozc during composition for conversion and navigation.
+    /// Keys NOT in this set trigger SubmitThenPassthrough during composition.
+    fn is_mozc_control_key(key: &str) -> bool {
+        MOZC_CONTROL_KEYS.contains(&key)
     }
 
     /// Convert an output string from the layout config into the appropriate OutputAction.
