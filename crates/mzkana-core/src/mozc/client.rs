@@ -14,7 +14,7 @@ use std::os::unix::io::FromRawFd;
 
 use super::codec::DecodeError;
 use super::proto::{
-    composition_mode, decode_response, encode_command, input_create_session, input_delete_session,
+    composition_mode, decode_response, input_create_session, input_delete_session,
     input_revert, input_send_kana, input_send_key_code_with_mods, input_send_special,
     input_send_special_with_mods, input_set_composition_mode, input_submit, special_key,
     DecodedOutput,
@@ -371,9 +371,8 @@ impl MozcClient {
     ///     then closes the connection.
     fn send_recv(&self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let mut stream = self.new_connection()?;
-        let cmd_bytes = encode_command(input);
 
-        stream.write_all(&cmd_bytes)?;
+        stream.write_all(&input.0)?;
         // Half-close the write side so the server knows the request is complete.
         stream.shutdown(std::net::Shutdown::Write)?;
 
@@ -496,6 +495,7 @@ pub fn xkb_name_to_mozc_special(name: &str) -> Option<i32> {
         "Next"  | "PageDown" => Some(special_key::PAGE_DOWN),
         "space"             => Some(special_key::SPACE),
         "Henkan"            => Some(special_key::HENKAN),
+        "Muhenkan"          => Some(special_key::MUHENKAN),
         "Hiragana_Katakana" => Some(special_key::KANA),
         // F1–F12: SpecialKey values 19–30
         s if s.starts_with('F') => s[1..].parse::<i32>().ok()

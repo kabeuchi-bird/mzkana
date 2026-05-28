@@ -1398,11 +1398,10 @@ mod codec_tests {
 
     #[test]
     fn proto_encode_send_kana_is_non_empty() {
-        use crate::mozc::proto::{encode_command, input_send_kana};
-        let encoded = encode_command(&input_send_kana(1234, "あ"));
-        assert!(!encoded.is_empty());
-        // encode_command returns raw Input bytes (no Command wrapper).
-        let fields = decode(&encoded).unwrap();
+        use crate::mozc::proto::input_send_kana;
+        let encoded = input_send_kana(1234, "あ");
+        assert!(!encoded.0.is_empty());
+        let fields = decode(&encoded.0).unwrap();
         // Input.type = SEND_KEY (3)
         assert_eq!(find_varint(&fields, 1), Some(3), "Input.type should be SEND_KEY=3");
         // Input.id = 1234
@@ -1578,10 +1577,7 @@ save = "S-C-s"
 
 // ── C4: Unassigned key routing during composition ──────────────────────────────
 
-#[test]
-fn c4_unassigned_control_key_during_composition() {
-    // Space is a control key; during composition it should be sent to Mozc
-    let toml = r#"
+const C4_TOML: &str = r#"
 [meta]
 name = "test"
 mode = "kana"
@@ -1595,16 +1591,21 @@ grid = """
 1 あ
 """
 "#;
-    let mut m = sm(toml);
-    // Press 'a' to start composition
+
+fn c4_sm_composing() -> StateMachine {
+    let mut m = sm(C4_TOML);
     let actions = press_seq(&mut m, &["a"]);
     assert!(
         actions.iter().any(|a| matches!(a, OutputAction::SendKana(_))),
         "pressing 'a' should start composition"
     );
-    // Now press space (unassigned but a control key)
-    let now = Instant::now();
-    let actions = m.process(InputEvent::down("space"), now);
+    m
+}
+
+#[test]
+fn c4_unassigned_control_key_during_composition() {
+    let mut m = c4_sm_composing();
+    let actions = m.process(InputEvent::down("space"), Instant::now());
     assert!(
         actions.contains(&OutputAction::SendFunctionKey("space".to_string())),
         "unassigned control key during composition should be SendFunctionKey, got {actions:?}"
@@ -1613,31 +1614,8 @@ grid = """
 
 #[test]
 fn c4_unassigned_non_control_key_during_composition() {
-    // x is not a control key; during composition it should submit then passthrough
-    let toml = r#"
-[meta]
-name = "test"
-mode = "kana"
-schema = 1
-[[layer]]
-id   = "base"
-kind = "single"
-grid = """
-. 1
-. a
-1 あ
-"""
-"#;
-    let mut m = sm(toml);
-    // Press 'a' to start composition
-    let actions = press_seq(&mut m, &["a"]);
-    assert!(
-        actions.iter().any(|a| matches!(a, OutputAction::SendKana(_))),
-        "pressing 'a' should start composition"
-    );
-    // Now press 'x' (unassigned, not a control key)
-    let now = Instant::now();
-    let actions = m.process(InputEvent::down("x"), now);
+    let mut m = c4_sm_composing();
+    let actions = m.process(InputEvent::down("x"), Instant::now());
     assert!(
         actions.contains(&OutputAction::SubmitThenPassthrough("x".to_string())),
         "unassigned non-control key during composition should be SubmitThenPassthrough, got {actions:?}"
@@ -1646,25 +1624,8 @@ grid = """
 
 #[test]
 fn c4_unassigned_key_outside_composition() {
-    // Outside composition, unassigned keys should just passthrough
-    let toml = r#"
-[meta]
-name = "test"
-mode = "kana"
-schema = 1
-[[layer]]
-id   = "base"
-kind = "single"
-grid = """
-. 1
-. a
-1 あ
-"""
-"#;
-    let mut m = sm(toml);
-    // Without any composition, press unassigned key 'x'
-    let now = Instant::now();
-    let actions = m.process(InputEvent::down("x"), now);
+    let mut m = sm(C4_TOML);
+    let actions = m.process(InputEvent::down("x"), Instant::now());
     assert!(
         actions.contains(&OutputAction::Passthrough("x".to_string())),
         "unassigned key outside composition should be Passthrough, got {actions:?}"
