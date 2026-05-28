@@ -395,9 +395,6 @@ impl MozcClient {
         if resp.is_empty() {
             return Err(MozcError::Protocol("empty response from Mozc server".into()));
         }
-        // Temporary: dump raw response bytes to diagnose preedit decoding.
-        eprintln!("[mzkana] raw_resp ({} bytes): {}", resp.len(),
-            resp.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
         Ok(decode_response(&resp)?)
     }
 

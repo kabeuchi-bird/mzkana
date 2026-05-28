@@ -271,19 +271,20 @@ pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::Decod
     }
     // Output.preedit = field 5
     if let Some(pre_fields) = find_msg(&out_fields, 5)? {
-        // Preedit.Segment repeated at field 2.
-        // Segment: annotation=field 1 (varint), value=field 2 (bytes),
-        //          value_length=field 3, key=field 4 (optional).
+        // Preedit.Segment repeated at field 2 (proto2 group syntax).
+        // Inside the group, field numbers continue from the group's own field number:
+        //   annotation = field 3 (varint), value = field 4 (bytes),
+        //   value_length = field 5, key = field 6 (optional).
         let segs = find_all_msg(&pre_fields, 2)?;
         let mut preedit = String::new();
         for seg in &segs {
-            if let Some(v) = find_bytes(seg, 2) {
+            if let Some(v) = find_bytes(seg, 4) {
                 match std::str::from_utf8(v) {
                     Ok(s) => preedit.push_str(s),
                     Err(_) => preedit.push_str(&String::from_utf8_lossy(v)),
                 }
             }
-            if !out.preedit_has_highlight && find_varint(seg, 1) == Some(annotation::HIGHLIGHT) {
+            if !out.preedit_has_highlight && find_varint(seg, 3) == Some(annotation::HIGHLIGHT) {
                 out.preedit_has_highlight = true;
             }
         }
