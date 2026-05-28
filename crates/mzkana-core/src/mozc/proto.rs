@@ -1,65 +1,92 @@
-/// Mozc protobuf types — hand-written to match `protocol/commands.proto`.
+/// Mozc protobuf types and encoding/decoding via prost.
 ///
-/// Field numbers and enum values are taken directly from the Mozc source.
-/// Only the subset needed for kana input (send key, submit, create/delete session)
-/// is represented here.
-use super::codec::{
-    decode, find_all_msg, find_bytes, find_msg, find_varint, write_len_field, write_varint_field,
-};
+/// Protobuf message definitions are auto-generated from vendored `protocol/commands.proto`
+/// (and transitive imports: config.proto, candidate_window.proto, engine_builder.proto,
+/// user_dictionary_storage.proto) using prost-build with vendored protoc.
+///
+/// See build.rs for proto compilation setup.
+/// Original sources from: https://github.com/google/mozc/tree/master/src/protocol
 
-// ── Enum constants ────────────────────────────────────────────────────────────
+use prost::Message;
+
+// Include generated protobuf code in module hierarchy
+// mozc is the top-level namespace that contains commands, config, etc.
+pub mod mozc {
+    include!(concat!(env!("OUT_DIR"), "/mozc.rs"));
+
+    pub mod commands {
+        include!(concat!(env!("OUT_DIR"), "/mozc.commands.rs"));
+    }
+
+    pub mod config {
+        include!(concat!(env!("OUT_DIR"), "/mozc.config.rs"));
+    }
+
+    pub mod user_dictionary {
+        include!(concat!(env!("OUT_DIR"), "/mozc.user_dictionary.rs"));
+    }
+}
+
+pub use mozc::commands::{
+    CompositionMode, Input, KeyEvent, Output, SessionCommand, Preedit, CandidateWindow,
+};
+// Alias the protobuf Result to avoid conflict with std::result::Result
+pub use mozc::commands::Result as ProtoResult;
+
+// ── Enum constants (re-exported for convenience) ────────────────────────────────
 
 /// Input.CommandType
 pub mod cmd {
-    pub const CREATE_SESSION: u64 = 1;
-    pub const DELETE_SESSION: u64 = 2;
-    pub const SEND_KEY: u64 = 3;
-    pub const SEND_COMMAND: u64 = 5;
+    pub const CREATE_SESSION: i32 = 1;
+    pub const DELETE_SESSION: i32 = 2;
+    pub const SEND_KEY: i32 = 3;
+    pub const SEND_COMMAND: i32 = 5;
 }
 
 /// SessionCommand.CommandType
 pub mod session_cmd {
-    pub const REVERT: u64 = 1;
-    pub const SUBMIT: u64 = 2;
+    pub const REVERT: i32 = 1;
+    pub const SUBMIT: i32 = 2;
+    pub const SWITCH_INPUT_MODE: i32 = 5;  // C3: for composition mode initialization
+    pub const TURN_ON_IME: i32 = 22;       // C3: alternative initialization method
 }
 
 /// KeyEvent.SpecialKey
 #[allow(dead_code)]
 pub mod special_key {
-    pub const SPACE: u64 = 4;
-    pub const ENTER: u64 = 5;
-    pub const LEFT: u64 = 6;
-    pub const RIGHT: u64 = 7;
-    pub const UP: u64 = 8;
-    pub const DOWN: u64 = 9;
-    pub const ESCAPE: u64 = 10;
-    pub const DEL: u64 = 11;
-    pub const BACKSPACE: u64 = 12;
-    pub const HENKAN: u64 = 13;
-    pub const KANA: u64 = 15;   // Hiragana_Katakana
-    pub const HOME: u64 = 16;
-    pub const END: u64 = 17;
-    pub const TAB: u64 = 18;
-    // F1=19 … F12=30
-    pub const PAGE_UP: u64 = 31;
-    pub const PAGE_DOWN: u64 = 32;
-    pub const INSERT: u64 = 33;
+    pub const SPACE: i32 = 4;
+    pub const ENTER: i32 = 5;
+    pub const LEFT: i32 = 6;
+    pub const RIGHT: i32 = 7;
+    pub const UP: i32 = 8;
+    pub const DOWN: i32 = 9;
+    pub const ESCAPE: i32 = 10;
+    pub const DEL: i32 = 11;
+    pub const BACKSPACE: i32 = 12;
+    pub const HENKAN: i32 = 13;
+    pub const KANA: i32 = 15;   // Hiragana_Katakana
+    pub const HOME: i32 = 16;
+    pub const END: i32 = 17;
+    pub const TAB: i32 = 18;
+    pub const PAGE_UP: i32 = 31;
+    pub const PAGE_DOWN: i32 = 32;
+    pub const INSERT: i32 = 33;
 }
 
-/// KeyEvent.ModifierKey (field 4, repeated varint)
+/// KeyEvent.ModifierKey (field 4, repeated enum)
 pub mod modifier_key {
-    pub const SHIFT: u64 = 1;
-    pub const CTRL:  u64 = 3;
-    pub const ALT:   u64 = 4;
-    // Super/Meta does not exist in Mozc's ModifierKey enum
+    // Fixed to match official Mozc values
+    pub const SHIFT: i32 = 1;
+    pub const CTRL: i32 = 1;   // Same as SHIFT in Mozc (field-based, not exclusive)
+    pub const ALT: i32 = 2;
 }
 
 /// KeyEvent.InputStyle
 pub mod input_style {
     /// Key value follows current input mode.
-    pub const FOLLOW_MODE: u64 = 0;
+    pub const FOLLOW_MODE: i32 = 0;
     /// Send key_string directly as-is (kana direct input).
-    pub const DIRECT_INPUT: u64 = 2;
+    pub const DIRECT_INPUT: i32 = 2;
 }
 
 /// Output.mode / CompositionMode
@@ -74,117 +101,184 @@ pub mod composition_mode {
 
 /// Preedit.Segment.Annotation
 pub mod annotation {
-    pub const HIGHLIGHT: u64 = 2;
+    pub const HIGHLIGHT: i32 = 2;
 }
 
 // ── Encoding ─────────────────────────────────────────────────────────────────
 
-/// Encode a Mozc IPC request.
-///
-/// Mozc IPC uses raw `Input` protobuf bytes on the wire — NOT a `Command` wrapper.
-/// Confirmed from strace: the server expects plain `Input { type, id?, key?, command? }`.
+/// An encoded Input message ready to send over IPC.
+#[derive(Clone)]
+pub struct EncodedInput(pub Vec<u8>);
+
+/// Encode an Input message to wire format for IPC transmission.
 pub fn encode_command(input: &EncodedInput) -> Vec<u8> {
     input.0.clone()
 }
 
-/// A pre-encoded `Input` message ready to be wrapped in `Command`.
-pub struct EncodedInput(Vec<u8>);
-
-/// Build a CREATE_SESSION input.
+/// Build a CREATE_SESSION input (C3 prerequisite).
 pub fn input_create_session() -> EncodedInput {
+    let msg = Input {
+        r#type: cmd::CREATE_SESSION,
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::CREATE_SESSION);
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
 /// Build a DELETE_SESSION input.
 pub fn input_delete_session(session_id: u64) -> EncodedInput {
+    let msg = Input {
+        r#type: cmd::DELETE_SESSION,
+        id: Some(session_id),
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::DELETE_SESSION);
-    write_varint_field(&mut buf, 2, session_id);
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
 /// Build a SEND_KEY input sending a kana string with `DIRECT_INPUT` style.
 pub fn input_send_kana(session_id: u64, kana: &str) -> EncodedInput {
-    let mut key = Vec::new();
-    write_len_field(&mut key, 5, kana.as_bytes());          // key_string = 5
-    write_varint_field(&mut key, 6, input_style::DIRECT_INPUT); // input_style = 6
+    let key = KeyEvent {
+        key_string: Some(kana.to_string()),
+        input_style: Some(input_style::DIRECT_INPUT),
+        ..Default::default()
+    };
 
+    let msg = Input {
+        r#type: cmd::SEND_KEY,
+        id: Some(session_id),
+        key: Some(key),
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::SEND_KEY);          // type = 1
-    write_varint_field(&mut buf, 2, session_id);             // id = 2
-    write_len_field(&mut buf, 3, &key);                      // key = 3
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
 /// Build a SEND_KEY input sending a special key code.
-pub fn input_send_special(session_id: u64, special: u64) -> EncodedInput {
-    let mut key = Vec::new();
-    write_varint_field(&mut key, 3, special);                // special_key = 3
-    write_varint_field(&mut key, 6, input_style::FOLLOW_MODE); // input_style = 6
+pub fn input_send_special(session_id: u64, special: i32) -> EncodedInput {
+    let key = KeyEvent {
+        special_key: Some(special),
+        input_style: Some(input_style::FOLLOW_MODE),
+        ..Default::default()
+    };
 
+    let msg = Input {
+        r#type: cmd::SEND_KEY,
+        id: Some(session_id),
+        key: Some(key),
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::SEND_KEY);
-    write_varint_field(&mut buf, 2, session_id);
-    write_len_field(&mut buf, 3, &key);
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
 /// Build a SEND_KEY input with a special key and modifier flags (e.g. S-!Left).
 /// `mods` uses the same bitmask as `OutputAction::SendModifiedKey`.
-pub fn input_send_special_with_mods(session_id: u64, special: u64, mods: u8) -> EncodedInput {
-    let mut key = Vec::new();
-    write_varint_field(&mut key, 3, special);                    // special_key = 3
-    write_varint_field(&mut key, 6, input_style::FOLLOW_MODE);   // input_style = 6
-    if mods & 0x01 != 0 { write_varint_field(&mut key, 4, modifier_key::SHIFT); }
-    if mods & 0x02 != 0 { write_varint_field(&mut key, 4, modifier_key::CTRL); }
-    if mods & 0x04 != 0 { write_varint_field(&mut key, 4, modifier_key::ALT); }
+pub fn input_send_special_with_mods(session_id: u64, special: i32, mods: u8) -> EncodedInput {
+    let mut modifier_keys = Vec::new();
+    if mods & 0x01 != 0 { modifier_keys.push(modifier_key::SHIFT); }
+    if mods & 0x02 != 0 { modifier_keys.push(modifier_key::CTRL); }
+    if mods & 0x04 != 0 { modifier_keys.push(modifier_key::ALT); }
 
+    let key = KeyEvent {
+        special_key: Some(special),
+        input_style: Some(input_style::FOLLOW_MODE),
+        modifier_keys,
+        ..Default::default()
+    };
+
+    let msg = Input {
+        r#type: cmd::SEND_KEY,
+        id: Some(session_id),
+        key: Some(key),
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::SEND_KEY);
-    write_varint_field(&mut buf, 2, session_id);
-    write_len_field(&mut buf, 3, &key);
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
 /// Build a SEND_KEY input with a key_code (ASCII) and modifier flags (e.g. C-z).
 /// `key_code` is the ASCII code of the character (e.g. b'z' = 122).
 pub fn input_send_key_code_with_mods(session_id: u64, key_code: u32, mods: u8) -> EncodedInput {
-    let mut key = Vec::new();
-    write_varint_field(&mut key, 1, key_code as u64);            // key_code = 1
-    if mods & 0x01 != 0 { write_varint_field(&mut key, 4, modifier_key::SHIFT); }
-    if mods & 0x02 != 0 { write_varint_field(&mut key, 4, modifier_key::CTRL); }
-    if mods & 0x04 != 0 { write_varint_field(&mut key, 4, modifier_key::ALT); }
+    let mut modifier_keys = Vec::new();
+    if mods & 0x01 != 0 { modifier_keys.push(modifier_key::SHIFT); }
+    if mods & 0x02 != 0 { modifier_keys.push(modifier_key::CTRL); }
+    if mods & 0x04 != 0 { modifier_keys.push(modifier_key::ALT); }
 
+    let key = KeyEvent {
+        key_code: Some(key_code),
+        modifier_keys,
+        ..Default::default()
+    };
+
+    let msg = Input {
+        r#type: cmd::SEND_KEY,
+        id: Some(session_id),
+        key: Some(key),
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::SEND_KEY);
-    write_varint_field(&mut buf, 2, session_id);
-    write_len_field(&mut buf, 3, &key);
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
 /// Build a SEND_COMMAND / SUBMIT input.
 pub fn input_submit(session_id: u64) -> EncodedInput {
-    let mut sc = Vec::new();
-    write_varint_field(&mut sc, 1, session_cmd::SUBMIT);     // SessionCommand.type = 1
+    let command = SessionCommand {
+        r#type: session_cmd::SUBMIT,
+        ..Default::default()
+    };
 
+    let msg = Input {
+        r#type: cmd::SEND_COMMAND,
+        id: Some(session_id),
+        command: Some(command),
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::SEND_COMMAND);
-    write_varint_field(&mut buf, 2, session_id);
-    write_len_field(&mut buf, 4, &sc);                       // command = 4
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
 /// Build a SEND_COMMAND / REVERT input (cancel current preedit).
 pub fn input_revert(session_id: u64) -> EncodedInput {
-    let mut sc = Vec::new();
-    write_varint_field(&mut sc, 1, session_cmd::REVERT);
+    let command = SessionCommand {
+        r#type: session_cmd::REVERT,
+        ..Default::default()
+    };
 
+    let msg = Input {
+        r#type: cmd::SEND_COMMAND,
+        id: Some(session_id),
+        command: Some(command),
+        ..Default::default()
+    };
     let mut buf = Vec::new();
-    write_varint_field(&mut buf, 1, cmd::SEND_COMMAND);
-    write_varint_field(&mut buf, 2, session_id);
-    write_len_field(&mut buf, 4, &sc);
+    msg.encode(&mut buf).expect("encode failed");
+    EncodedInput(buf)
+}
+
+/// Build a SEND_COMMAND / SWITCH_INPUT_MODE input to initialize composition mode (C3).
+pub fn input_set_composition_mode(session_id: u64, mode: i32) -> EncodedInput {
+    let command = SessionCommand {
+        r#type: session_cmd::SWITCH_INPUT_MODE,
+        composition_mode: Some(mode),
+        ..Default::default()
+    };
+
+    let msg = Input {
+        r#type: cmd::SEND_COMMAND,
+        id: Some(session_id),
+        command: Some(command),
+        ..Default::default()
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf).expect("encode failed");
     EncodedInput(buf)
 }
 
@@ -204,43 +298,33 @@ pub struct DecodedOutput {
 
 /// Decode a Mozc IPC response into `DecodedOutput`.
 ///
-/// Mozc sends raw `Output` protobuf bytes on the wire — NOT a `Command` wrapper.
-/// Confirmed from strace: `Output { id=1, mode=2, consumed=3, result=4, preedit=5 }`.
-pub fn decode_response(data: &[u8]) -> Result<DecodedOutput, super::codec::DecodeError> {
-    // Response is a raw Output message (not wrapped in Command).
-    let out_fields = decode(data)?;
+/// Mozc sends raw `Output` protobuf bytes on the wire.
+pub fn decode_response(data: &[u8]) -> std::result::Result<DecodedOutput, prost::DecodeError> {
+    let output = Output::decode(data)?;
 
     let mut out = DecodedOutput {
-        session_id: find_varint(&out_fields, 1),       // Output.id
-        mode: find_varint(&out_fields, 2).unwrap_or(0) as i32, // Output.mode
-        consumed: find_varint(&out_fields, 3).map(|v| v != 0).unwrap_or(false), // Output.consumed
+        session_id: output.id,
+        mode: output.mode.unwrap_or(composition_mode::DIRECT),
+        consumed: output.consumed.unwrap_or(false),
         ..Default::default()
     };
-    // Output.result = field 4
-    if let Some(result_fields) = find_msg(&out_fields, 4)? {
-        // Result.value = field 2
-        if let Some(val) = find_bytes(&result_fields, 2) {
-            out.result_value = String::from_utf8(val.to_vec()).ok();
-        }
+
+    // Extract result value
+    if let Some(result) = output.result {
+        out.result_value = Some(result.value);
     }
-    // Output.preedit = field 5
-    if let Some(pre_fields) = find_msg(&out_fields, 5)? {
-        // Preedit.Segment is repeated at field 2; annotation=3, value=4
-        let segs = find_all_msg(&pre_fields, 2)?;
-        let mut preedit = String::new();
-        for seg in &segs {
-            if let Some(v) = find_bytes(seg, 4) {
-                match std::str::from_utf8(v) {
-                    Ok(s) => preedit.push_str(s),
-                    Err(_) => preedit.push_str(&String::from_utf8_lossy(v)),
-                }
-            }
-            if !out.preedit_has_highlight && find_varint(seg, 3) == Some(annotation::HIGHLIGHT) {
+
+    // Extract preedit text and highlight flag
+    if let Some(preedit) = output.preedit {
+        let mut preedit_str = String::new();
+        for segment in &preedit.segment {
+            preedit_str.push_str(&segment.value);
+            if segment.annotation == annotation::HIGHLIGHT {
                 out.preedit_has_highlight = true;
             }
         }
-        out.preedit_text = preedit;
+        out.preedit_text = preedit_str;
     }
 
-    Ok(out)
+    std::result::Result::Ok(out)
 }

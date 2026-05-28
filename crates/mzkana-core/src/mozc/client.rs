@@ -209,6 +209,11 @@ impl std::fmt::Display for MozcError {
 impl std::error::Error for MozcError {}
 impl From<io::Error> for MozcError { fn from(e: io::Error) -> Self { Self::Io(e) } }
 impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::Decode(e) } }
+impl From<prost::DecodeError> for MozcError {
+    fn from(e: prost::DecodeError) -> Self {
+        Self::Decode(DecodeError(e.to_string()))
+    }
+}
 
 /// Blocking Mozc IPC client.
 ///
@@ -414,7 +419,7 @@ impl MozcClient {
         Ok(MozcOutput::from_decoded(self.send_recv(input)?))
     }
 
-    fn send_special_key(&self, code: u64) -> Result<MozcOutput, MozcError> {
+    fn send_special_key(&self, code: i32) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         self.dispatch(&input_send_special(sid, code))
     }
@@ -466,7 +471,7 @@ impl MozcClient {
 }
 
 /// Map an XKB keysym name to a Mozc SpecialKey value.
-pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
+pub fn xkb_name_to_mozc_special(name: &str) -> Option<i32> {
     match name {
         "Return"            => Some(special_key::ENTER),
         "Tab"               => Some(special_key::TAB),
@@ -486,7 +491,7 @@ pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
         "Henkan"            => Some(special_key::HENKAN),
         "Hiragana_Katakana" => Some(special_key::KANA),
         // F1–F12: SpecialKey values 19–30
-        s if s.starts_with('F') => s[1..].parse::<u64>().ok()
+        s if s.starts_with('F') => s[1..].parse::<i32>().ok()
             .filter(|&n| (1..=12).contains(&n))
             .map(|n| 18 + n),
         _ => None,
