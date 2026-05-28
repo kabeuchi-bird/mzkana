@@ -1426,6 +1426,8 @@ mod codec_tests {
         let mut preedit_msg = Vec::new();
         write_varint_field(&mut preedit_msg, 1, 2);   // cursor = 2
         // Segment 1: UNDERLINE, value = "か"
+        // Mozc proto2 group: field numbers continue from group field (2):
+        //   annotation=3, value=4, value_length=5, key=6
         preedit_msg.push(0x13);
         write_varint_field(&mut preedit_msg, 3, 1);   // annotation = UNDERLINE
         write_len_field(&mut preedit_msg, 4, "か".as_bytes());

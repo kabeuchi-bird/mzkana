@@ -123,6 +123,23 @@ void MzkanaFcitxEngine::reset(const fcitx::InputMethodEntry & /*entry*/,
 
 void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
                                      const MzkanaResult &result) {
+    // passthrough_key: side-effect key forwarded after consuming the original
+    // event (e.g. BackSpace from chord rewrite to undo speculatively-committed
+    // kana). Must be applied BEFORE commitString so the BackSpace deletes the
+    // old text before the new commit appends to it.
+    //
+    // Only forward when consumed=true; if consumed=false, fcitx5 lets the
+    // natural key event reach the app already, and forwarding would double it.
+    if (result.consumed && result.passthrough_key_len > 0) {
+        std::string keyName(
+            reinterpret_cast<const char *>(result.passthrough_key),
+            result.passthrough_key_len);
+        auto sym = fcitx::Key::keySymFromString(keyName);
+        if (sym != FcitxKey_None) {
+            ic->forwardKey(fcitx::Key(sym));
+        }
+    }
+
     if (result.commit_len > 0) {
         ic->commitString(std::string(
             reinterpret_cast<const char *>(result.commit), result.commit_len));
@@ -166,7 +183,7 @@ std::string MzkanaFcitxEngine::subMode(const fcitx::InputMethodEntry &,
 
 std::string MzkanaFcitxEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
                                                   fcitx::InputContext &) {
-    return mozcAvailable_ ? "MzKana（Mozc）" : "Mzkana（変換エンジン未起動）";
+    return mozcAvailable_ ? "MzKana（Mozc）" : "MzKana（変換エンジン未起動）";
 }
 
 void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {
