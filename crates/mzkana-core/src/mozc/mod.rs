@@ -1,8 +1,10 @@
 pub(crate) mod proto;
 pub mod client;
+pub mod worker;
 
 pub use client::{connect_mozc_abstract, default_socket_path, find_abstract_socket_name, ipc_key_from_socket_name, MozcClient, MozcError};
 pub use proto::{composition_mode, DecodedOutput};
+pub use worker::{MozcWorker, Op, WorkerError};
 
 /// Decoded Mozc server response exposed to callers.
 #[derive(Debug, Clone, Default)]

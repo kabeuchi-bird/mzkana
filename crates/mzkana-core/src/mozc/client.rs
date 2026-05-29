@@ -349,8 +349,10 @@ impl MozcClient {
             #[cfg(not(target_os = "linux"))]
             { return Err(io::Error::new(io::ErrorKind::Unsupported, "abstract sockets unsupported")); }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        // Socket-level timeout is a backstop only.  The primary UI-freeze guard is
+        // the worker thread's 150 ms hard timeout (see mozc::worker); keep this short.
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         Ok(stream)
     }
 
