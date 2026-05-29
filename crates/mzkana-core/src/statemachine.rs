@@ -209,6 +209,9 @@ impl StateMachine {
                 self.update_chord_deadline();
             }
         }
+        // C1: also expire stale pending keys on tick so a chord cannot form with a
+        // key whose window has elapsed, even if no new key has arrived since.
+        self.prune_expired_pending(now);
         actions
     }
 
@@ -379,6 +382,12 @@ impl StateMachine {
 
     fn speculative_emit(&mut self, key: &str, _shift: bool, now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
+
+        // C1: enforce the chord window by time. Drop pending keys that are older
+        // than their chord window relative to `now` so a key pressed long after a
+        // previous one (well past chord_window_ms) cannot spuriously form a chord
+        // with it. The just-pushed key (ts == now) is always retained.
+        self.prune_expired_pending(now);
 
         // Resolve what chord / prefix / postfix candidates exist.
         // Timed chords (symmetric=false) use a deadline window.
@@ -898,6 +907,28 @@ impl StateMachine {
             }
         }
         self.layout.settings.chord_window_ms
+    }
+
+    /// C1: drop pending keys that fall outside their chord window relative to `now`.
+    ///
+    /// Each pending key is kept only while `now - ts <= chord_window_for(key)`.
+    /// Prefix sequences manage their own lifecycle (the trigger persists until the
+    /// sequence resolves or a non-matching key clears it), so they are left intact.
+    fn prune_expired_pending(&mut self, now: Instant) {
+        if self.pending_keys.len() < 2 || self.has_prefix_continuation() {
+            return;
+        }
+        // Build the kept set with only immutable borrows (chord_window_for reads
+        // self.layout), then replace, to avoid a borrow conflict with retain.
+        let kept: Vec<(String, Instant)> = self
+            .pending_keys
+            .iter()
+            .filter(|(k, ts)| {
+                now.duration_since(*ts).as_millis() as u64 <= u64::from(self.chord_window_for(k))
+            })
+            .cloned()
+            .collect();
+        self.pending_keys = kept;
     }
 
     fn update_chord_deadline(&mut self) {

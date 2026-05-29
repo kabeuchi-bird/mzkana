@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{config::load_layout, statemachine::*};
 
@@ -217,6 +217,36 @@ fn prefix_trigger_alone_stays_base() {
 }
 
 // ── Chord (新下駄) ────────────────────────────────────────────────────────────
+
+#[test]
+fn chord_within_window_fires() {
+    // C1: f then j within chord_window_ms (50ms) → chord [f,j] → を, rewrite.
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    let a1 = m.process(InputEvent::down("f"), t0);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())));
+    // j arrives 30ms later — inside the 50ms window.
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(30));
+    assert!(a2.contains(&OutputAction::Backspace), "{a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("を".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "を");
+}
+
+#[test]
+fn chord_past_window_does_not_fire() {
+    // C1 regression: f then j after chord_window_ms (50ms) must NOT chord. The
+    // stale f is pruned, so j just emits its own base kana — no false rewrite.
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    let a1 = m.process(InputEvent::down("f"), t0);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())));
+    // j arrives 200ms later — well past the 50ms window.
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(200));
+    assert!(!a2.contains(&OutputAction::Backspace), "no rewrite expected: {a2:?}");
+    assert!(!a2.contains(&OutputAction::SendKana("を".to_string())), "no chord expected: {a2:?}");
+    // き stays, and j contributes its own base kana on top.
+    assert!(m.tentative_kana_string().starts_with('き'), "got {:?}", m.tentative_kana_string());
+}
 
 #[test]
 fn chord_rewrite() {

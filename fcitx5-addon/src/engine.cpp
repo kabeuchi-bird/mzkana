@@ -148,18 +148,27 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
     std::string preedit(
         reinterpret_cast<const char *>(result.preedit), result.preedit_len);
 
-    fcitx::Text preeditText;
-    if (!preedit.empty()) {
-        preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
-        preeditText.setCursor(static_cast<int>(preedit.size()));
+    // Only re-render the preedit when it actually changed. This keeps the ~100 Hz
+    // tick timer (C2) cheap: a pure pruning/deadline tick that leaves the preedit
+    // unchanged costs no UI update.
+    if (preedit != lastPreedit_) {
+        fcitx::Text preeditText;
+        if (!preedit.empty()) {
+            preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
+            preeditText.setCursor(static_cast<int>(preedit.size()));
+        }
+        // setClientPreedit → inline in capable clients
+        // setPreedit → floating panel as fallback
+        ic->inputPanel().setClientPreedit(preeditText);
+        ic->inputPanel().setPreedit(preeditText);
+        ic->updatePreedit();
+        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        lastPreedit_ = preedit;
     }
 
-    // setClientPreedit → inline in capable clients
-    // setPreedit → floating panel as fallback
-    ic->inputPanel().setClientPreedit(preeditText);
-    ic->inputPanel().setPreedit(preeditText);
-    ic->updatePreedit();
-    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    // Run the tick timer while a preedit is active so chord-confirm deadlines and
+    // deferred compound-output tails fire even without further key input.
+    updateTickTimer(!preedit.empty(), ic);
 
     if (result.forward_key_len > 0) {
         std::string keyName(reinterpret_cast<const char *>(result.forward_key),
@@ -191,6 +200,57 @@ void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {
     ic->inputPanel().setPreedit(fcitx::Text());
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    lastPreedit_.clear();
+    // No preedit left → stop the tick timer.
+    if (tickTimer_) {
+        tickTimer_->setEnabled(false);
+    }
+}
+
+// ── C2: periodic tick wiring ────────────────────────────────────────────────────
+
+void MzkanaFcitxEngine::updateTickTimer(bool active, fcitx::InputContext *ic) {
+    constexpr uint64_t kTickIntervalUs = 10000; // 10 ms
+
+    if (!active) {
+        if (tickTimer_) {
+            tickTimer_->setEnabled(false);
+        }
+        return;
+    }
+
+    // Remember which input context the timer callback should drive.
+    tickIc_ = ic->watch();
+
+    if (!tickTimer_) {
+        tickTimer_ = instance_->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + kTickIntervalUs, 0,
+            [this](fcitx::EventSourceTime *, uint64_t) {
+                // onTick() runs applyResult(), which re-arms or stops this timer
+                // via updateTickTimer() depending on whether a preedit remains.
+                onTick();
+                return true;
+            });
+    } else {
+        tickTimer_->setNextInterval(kTickIntervalUs);
+        tickTimer_->setOneShot();
+        tickTimer_->setEnabled(true);
+    }
+}
+
+void MzkanaFcitxEngine::onTick() {
+    if (!engine_) {
+        return;
+    }
+    auto *ic = tickIc_.get();
+    if (!ic) {
+        // Input context went away — stop ticking.
+        if (tickTimer_) {
+            tickTimer_->setEnabled(false);
+        }
+        return;
+    }
+    applyResult(ic, mzkana_engine_tick(engine_));
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────
