@@ -1320,137 +1320,45 @@ tap_output = "あ"
     assert!(load_layout(toml).is_err());
 }
 
-// ── Mozc codec unit tests ─────────────────────────────────────────────────────
+// ── Mozc proto encode/decode tests ─────────────────────────────────────────────
 
 #[cfg(test)]
-mod codec_tests {
-    use crate::mozc::codec::{decode, find_bytes, find_msg, find_varint, write_len_field, write_varint_field};
-
-    fn round_trip_varint(field: u32, value: u64) {
-        let mut buf = Vec::new();
-        write_varint_field(&mut buf, field, value);
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_varint(&fields, field), Some(value));
-    }
-
-    #[test]
-    fn codec_varint_roundtrip_small() {
-        round_trip_varint(1, 0);
-        round_trip_varint(1, 1);
-        round_trip_varint(2, 127);
-        round_trip_varint(3, 128);
-        round_trip_varint(15, u64::MAX);
-    }
-
-    #[test]
-    fn codec_len_field_roundtrip() {
-        let data = "かきくけこ".as_bytes();
-        let mut buf = Vec::new();
-        write_len_field(&mut buf, 5, data);
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_bytes(&fields, 5), Some(data));
-    }
-
-    #[test]
-    fn codec_multiple_fields() {
-        let mut buf = Vec::new();
-        write_varint_field(&mut buf, 1, 42);
-        write_len_field(&mut buf, 2, b"hello");
-        write_varint_field(&mut buf, 3, 99);
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_varint(&fields, 1), Some(42));
-        assert_eq!(find_bytes(&fields, 2), Some(b"hello".as_slice()));
-        assert_eq!(find_varint(&fields, 3), Some(99));
-    }
-
-    #[test]
-    fn codec_nested_message_roundtrip() {
-        // inner = { field 2: "かな" }
-        let mut inner = Vec::new();
-        write_len_field(&mut inner, 2, "かな".as_bytes());
-        let mut outer = Vec::new();
-        write_varint_field(&mut outer, 1, 7);
-        write_len_field(&mut outer, 4, &inner);
-        let fields = decode(&outer).unwrap();
-        assert_eq!(find_varint(&fields, 1), Some(7));
-        let inner_fields = find_msg(&fields, 4).unwrap().unwrap();
-        assert_eq!(find_bytes(&inner_fields, 2), Some("かな".as_bytes()));
-    }
-
-    #[test]
-    fn codec_group_encode_decode() {
-        // Proto2 group: field 2, START_GROUP wire=3, fields, END_GROUP wire=4
-        // Start:  tag = (2 << 3) | 3 = 0x13
-        // End:    tag = (2 << 3) | 4 = 0x14
-        let mut buf = Vec::new();
-        write_varint_field(&mut buf, 1, 3); // Preedit.cursor = 3
-        buf.push(0x13);                     // Segment group start
-        write_varint_field(&mut buf, 3, 2); // Segment.annotation = HIGHLIGHT(2)
-        write_len_field(&mut buf, 4, "変換".as_bytes()); // Segment.value
-        buf.push(0x14);                     // Segment group end
-
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_varint(&fields, 1), Some(3));
-        let seg_fields = find_msg(&fields, 2).unwrap().unwrap();
-        assert_eq!(find_varint(&seg_fields, 3), Some(2)); // HIGHLIGHT
-        assert_eq!(find_bytes(&seg_fields, 4), Some("変換".as_bytes()));
-    }
+mod proto_tests {
+    use crate::mozc::proto::mozc::commands::{preedit::Segment, Output, Preedit, Result as MResult};
+    use crate::mozc::proto::{decode_response, input_send_kana, Input};
+    use prost::Message;
 
     #[test]
     fn proto_encode_send_kana_is_non_empty() {
-        use crate::mozc::proto::input_send_kana;
         let encoded = input_send_kana(1234, "あ");
         assert!(!encoded.0.is_empty());
-        let fields = decode(&encoded.0).unwrap();
-        // Input.type = SEND_KEY (3)
-        assert_eq!(find_varint(&fields, 1), Some(3), "Input.type should be SEND_KEY=3");
-        // Input.id = 1234
-        assert_eq!(find_varint(&fields, 2), Some(1234), "Input.id should be 1234");
+        let input = Input::decode(&encoded.0[..]).expect("decode Input");
+        assert_eq!(input.r#type, 3, "Input.type should be SEND_KEY=3");
+        assert_eq!(input.id, Some(1234), "Input.id should be 1234");
     }
 
-    /// Build a Command{output: Output{...}} with preedit segments (including HIGHLIGHT)
-    /// and verify that decode_response() extracts all fields correctly.
+    /// Build an Output with preedit segments (including HIGHLIGHT) and verify that
+    /// decode_response() extracts all fields correctly.
     #[test]
     fn decode_response_full_roundtrip() {
-        use crate::mozc::proto::decode_response;
+        // annotation: UNDERLINE=1, HIGHLIGHT=2; Result.type: STRING=1
+        let output = Output {
+            id: Some(42),
+            mode: Some(1), // HIRAGANA
+            consumed: Some(true),
+            result: Some(MResult { r#type: 1, value: "変換".to_string(), ..Default::default() }),
+            preedit: Some(Preedit {
+                cursor: 2,
+                segment: vec![
+                    Segment { annotation: 1, value: "か".to_string(), value_length: 1, ..Default::default() },
+                    Segment { annotation: 2, value: "な".to_string(), value_length: 1, ..Default::default() },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
 
-        // ── Build Result { type=STRING(1), value="変換" } ──────────────────
-        let mut result_msg = Vec::new();
-        write_varint_field(&mut result_msg, 1, 1);                      // type = STRING
-        write_len_field(&mut result_msg, 2, "変換".as_bytes());          // value
-
-        // ── Build Preedit with two Segments using proto2 group encoding ────
-        //    group start: tag = (2 << 3) | 3 = 0x13
-        //    group end:   tag = (2 << 3) | 4 = 0x14
-        let mut preedit_msg = Vec::new();
-        write_varint_field(&mut preedit_msg, 1, 2);   // cursor = 2
-        // Segment 1: UNDERLINE, value = "か"
-        // Mozc proto2 group: field numbers continue from group field (2):
-        //   annotation=3, value=4, value_length=5, key=6
-        preedit_msg.push(0x13);
-        write_varint_field(&mut preedit_msg, 3, 1);   // annotation = UNDERLINE
-        write_len_field(&mut preedit_msg, 4, "か".as_bytes());
-        write_varint_field(&mut preedit_msg, 5, 1);   // value_length = 1
-        preedit_msg.push(0x14);
-        // Segment 2: HIGHLIGHT, value = "な"
-        preedit_msg.push(0x13);
-        write_varint_field(&mut preedit_msg, 3, 2);   // annotation = HIGHLIGHT
-        write_len_field(&mut preedit_msg, 4, "な".as_bytes());
-        write_varint_field(&mut preedit_msg, 5, 1);   // value_length = 1
-        preedit_msg.push(0x14);
-
-        // ── Build Output ──────────────────────────────────────────────────
-        let mut output_msg = Vec::new();
-        write_varint_field(&mut output_msg, 1, 42);              // id = 42
-        write_varint_field(&mut output_msg, 2, 1);               // mode = HIRAGANA
-        write_varint_field(&mut output_msg, 3, 1);               // consumed = true
-        write_len_field(&mut output_msg, 4, &result_msg);        // result
-        write_len_field(&mut output_msg, 5, &preedit_msg);       // preedit
-
-        // decode_response expects raw Output bytes (no Command wrapper).
-
-        // ── Decode and verify ─────────────────────────────────────────────
-        let out = decode_response(&output_msg).expect("decode_response failed");
+        let out = decode_response(&output.encode_to_vec()).expect("decode_response failed");
         assert_eq!(out.session_id, Some(42));
         assert_eq!(out.mode, 1); // HIRAGANA
         assert!(out.consumed);

@@ -1,15 +1,18 @@
-/// Mozc protobuf types and encoding/decoding via prost.
-///
-/// Protobuf message definitions are auto-generated from vendored `protocol/commands.proto`
-/// (and transitive imports: config.proto, candidate_window.proto, engine_builder.proto,
-/// user_dictionary_storage.proto) using prost-build with vendored protoc.
-///
-/// See build.rs for proto compilation setup.
-/// Original sources from: https://github.com/google/mozc/tree/master/src/protocol
+//! Mozc protobuf types and encoding/decoding via prost.
+//!
+//! Protobuf message definitions are auto-generated from vendored `protocol/commands.proto`
+//! (and transitive imports: config.proto, candidate_window.proto, engine_builder.proto,
+//! user_dictionary_storage.proto) using prost-build with vendored protoc.
+//!
+//! See build.rs for proto compilation setup.
+//! Original sources from: https://github.com/google/mozc/tree/master/src/protocol
 
 use prost::Message;
 
-// Include generated protobuf code in module hierarchy
+// Include generated protobuf code in module hierarchy.
+// The generated files carry upstream Mozc doc comments and define many messages
+// we don't construct directly, so suppress lints we can't fix in generated code.
+#[allow(dead_code, clippy::all, clippy::pedantic)]
 pub mod mozc {
     include!(concat!(env!("OUT_DIR"), "/mozc.rs"));
 

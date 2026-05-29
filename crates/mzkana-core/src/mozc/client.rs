@@ -12,7 +12,6 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::FromRawFd;
 
-use super::codec::DecodeError;
 use super::proto::{
     composition_mode, decode_response, input_create_session, input_delete_session,
     input_revert, input_send_kana, input_send_key_code_with_mods, input_send_special,
@@ -191,7 +190,7 @@ pub fn ipc_key_from_socket_name(abs_name: &str) -> Option<Vec<u8>> {
 #[derive(Debug)]
 pub enum MozcError {
     Io(io::Error),
-    Decode(DecodeError),
+    Decode(prost::DecodeError),
     Protocol(String),
     NotConnected,
 }
@@ -209,12 +208,7 @@ impl std::fmt::Display for MozcError {
 
 impl std::error::Error for MozcError {}
 impl From<io::Error> for MozcError { fn from(e: io::Error) -> Self { Self::Io(e) } }
-impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::Decode(e) } }
-impl From<prost::DecodeError> for MozcError {
-    fn from(e: prost::DecodeError) -> Self {
-        Self::Decode(DecodeError(e.to_string()))
-    }
-}
+impl From<prost::DecodeError> for MozcError { fn from(e: prost::DecodeError) -> Self { Self::Decode(e) } }
 
 /// Blocking Mozc IPC client.
 ///
