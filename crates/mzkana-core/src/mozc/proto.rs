@@ -42,7 +42,9 @@ pub mod cmd {
 pub mod session_cmd {
     pub const REVERT: i32 = 1;
     pub const SUBMIT: i32 = 2;
-    pub const SWITCH_INPUT_MODE: i32 = 5;
+    #[allow(dead_code)]
+    pub const SWITCH_COMPOSITION_MODE: i32 = 5;
+    pub const TURN_ON_IME: i32 = 22;
 }
 
 /// KeyEvent.SpecialKey
@@ -77,9 +79,13 @@ pub mod modifier_key {
 
 /// KeyEvent.InputStyle
 pub mod input_style {
-    /// Key value follows current input mode.
+    /// Key value follows current input mode (romaji→kana conversion table is used).
     pub const FOLLOW_MODE: i32 = 0;
-    /// Send key_string directly as-is (kana direct input).
+    /// Insert key_string directly into the composition buffer, bypassing romaji conversion.
+    /// Use this for kana direct input to trigger InsertCharacterPreedit().
+    pub const AS_IS: i32 = 1;
+    /// Commit key_string directly to result, bypassing preedit entirely.
+    #[allow(dead_code)]
     pub const DIRECT_INPUT: i32 = 2;
 }
 
@@ -113,16 +119,49 @@ pub fn input_create_session() -> EncodedInput {
     encode_input(Input { r#type: cmd::CREATE_SESSION, ..Default::default() })
 }
 
+/// Build a SEND_COMMAND / SWITCH_COMPOSITION_MODE input.
+///
+/// Only works when the IME is already ON (use `input_turn_on_ime` to activate).
+/// `mode` should be a `composition_mode` constant (e.g. `composition_mode::HIRAGANA`).
+#[allow(dead_code)]
+pub fn input_switch_composition_mode(session_id: u64, mode: i32) -> EncodedInput {
+    let command = SessionCommand {
+        r#type: session_cmd::SWITCH_COMPOSITION_MODE,
+        composition_mode: Some(mode),
+        ..Default::default()
+    };
+    encode_input(Input { r#type: cmd::SEND_COMMAND, id: Some(session_id), command: Some(command), ..Default::default() })
+}
+
+/// Build a SEND_COMMAND / TURN_ON_IME input.
+///
+/// TURN_ON_IME transitions the session from IME-OFF (Direct) to the specified
+/// composition mode.  New sessions start IME-OFF; this call is required before
+/// kana input will be consumed by Mozc.
+pub fn input_turn_on_ime(session_id: u64, mode: i32) -> EncodedInput {
+    let command = SessionCommand {
+        r#type: session_cmd::TURN_ON_IME,
+        composition_mode: Some(mode),
+        ..Default::default()
+    };
+    encode_input(Input { r#type: cmd::SEND_COMMAND, id: Some(session_id), command: Some(command), ..Default::default() })
+}
+
 /// Build a DELETE_SESSION input.
 pub fn input_delete_session(session_id: u64) -> EncodedInput {
     encode_input(Input { r#type: cmd::DELETE_SESSION, id: Some(session_id), ..Default::default() })
 }
 
-/// Build a SEND_KEY input sending a kana string with `DIRECT_INPUT` style.
+/// Build a SEND_KEY input sending a kana string with `AS_IS` style.
+///
+/// InputStyle semantics:
+///   FOLLOW_MODE (0): routes through romaji→kana table; kana strings get no output.
+///   AS_IS       (1): calls InsertCharacterPreedit() — inserts kana directly into preedit.
+///   DIRECT_INPUT(2): commits directly to result, bypassing preedit entirely.
 pub fn input_send_kana(session_id: u64, kana: &str) -> EncodedInput {
     let key = KeyEvent {
         key_string: Some(kana.to_string()),
-        input_style: Some(input_style::DIRECT_INPUT),
+        input_style: Some(input_style::AS_IS),
         ..Default::default()
     };
     encode_input(Input { r#type: cmd::SEND_KEY, id: Some(session_id), key: Some(key), ..Default::default() })
@@ -178,16 +217,6 @@ pub fn input_submit(session_id: u64) -> EncodedInput {
 /// Build a SEND_COMMAND / REVERT input (cancel current preedit).
 pub fn input_revert(session_id: u64) -> EncodedInput {
     let command = SessionCommand { r#type: session_cmd::REVERT, ..Default::default() };
-    encode_input(Input { r#type: cmd::SEND_COMMAND, id: Some(session_id), command: Some(command), ..Default::default() })
-}
-
-/// Build a SEND_COMMAND / SWITCH_INPUT_MODE input to initialize composition mode (C3).
-pub fn input_set_composition_mode(session_id: u64, mode: i32) -> EncodedInput {
-    let command = SessionCommand {
-        r#type: session_cmd::SWITCH_INPUT_MODE,
-        composition_mode: Some(mode),
-        ..Default::default()
-    };
     encode_input(Input { r#type: cmd::SEND_COMMAND, id: Some(session_id), command: Some(command), ..Default::default() })
 }
 

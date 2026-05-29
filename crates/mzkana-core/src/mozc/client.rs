@@ -16,7 +16,7 @@ use super::codec::DecodeError;
 use super::proto::{
     composition_mode, decode_response, input_create_session, input_delete_session,
     input_revert, input_send_kana, input_send_key_code_with_mods, input_send_special,
-    input_send_special_with_mods, input_set_composition_mode, input_submit, special_key,
+    input_send_special_with_mods, input_submit, input_turn_on_ime, special_key,
     DecodedOutput,
 };
 use super::MozcOutput;
@@ -364,7 +364,7 @@ impl MozcClient {
     ///
     /// Mozc IPC wire protocol (confirmed from `unix_ipc.cc` and `session_server.cc`):
     ///   - NO length framing in either direction.
-    ///   - Client sends raw `Input` protobuf bytes (via `encode_command`), then
+    ///   - Client sends raw `Input` protobuf bytes, then
     ///     `shutdown(SHUT_WR)`.  The shutdown signals end-of-request; without it
     ///     the server blocks waiting for more data and the call times out.
     ///   - Server reads until EOF, processes, writes raw `Output` protobuf bytes,
@@ -407,13 +407,10 @@ impl MozcClient {
         let sid = out.session_id
             .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?;
         self.session_id = Some(sid);
-
-        // C3: Initialize Mozc to HIRAGANA composition mode after session creation.
-        // By default, sessions start in DIRECT mode (IME off), which means key_string
-        // sent via DIRECT_INPUT won't reach the composer. HIRAGANA mode enables
-        // composition of kana input.
-        self.send_recv(&input_set_composition_mode(sid, composition_mode::HIRAGANA))?;
-
+        // C3: New sessions start in IME-OFF (Direct) state.  TURN_ON_IME activates the IME
+        // and sets the composition mode in one step — SWITCH_COMPOSITION_MODE alone does
+        // not transition out of IME-OFF and leaves mode=0 unchanged.
+        self.send_recv(&input_turn_on_ime(sid, composition_mode::HIRAGANA))?;
         Ok(())
     }
 
@@ -432,7 +429,15 @@ impl MozcClient {
 
     pub fn send_kana(&self, kana: &str) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
-        self.dispatch(&input_send_kana(sid, kana))
+        let result = self.dispatch(&input_send_kana(sid, kana));
+        match &result {
+            Ok(out) => eprintln!(
+                "[mzkana] send_kana({kana:?}) → consumed={} preedit={:?} result={:?} mode={}",
+                out.consumed, out.preedit, out.result, out.mode
+            ),
+            Err(e) => eprintln!("[mzkana] send_kana({kana:?}) FAILED: {e}"),
+        }
+        result
     }
 
     pub fn send_backspace(&self) -> Result<MozcOutput, MozcError> {
