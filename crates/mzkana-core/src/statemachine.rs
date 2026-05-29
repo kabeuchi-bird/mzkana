@@ -420,6 +420,12 @@ impl StateMachine {
                     if Self::is_mozc_control_key(key) {
                         return vec![OutputAction::SendFunctionKey(key.to_string())];
                     } else {
+                        // Submitting commits and clears the Mozc preedit, so drop the local
+                        // tentative state too to keep the 1:1 invariant (tentative_buffer
+                        // mirrors Mozc preedit) intact.
+                        self.tentative_buffer.clear();
+                        self.pending_keys.clear();
+                        self.mozc_mode = MozcMode::Composition;
                         return vec![OutputAction::SubmitThenPassthrough(key.to_string())];
                     }
                 } else {

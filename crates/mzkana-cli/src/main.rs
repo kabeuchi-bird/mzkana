@@ -204,7 +204,10 @@ fn dispatch_to_mozc(mozc: &mut MozcClient, action: &OutputAction) -> Result<Opti
         }
         // SendFunctionKey: unmapped keys return Err(Protocol) which propagates.
         OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).map(Some),
-        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) | OutputAction::SubmitThenPassthrough(_) => Ok(None),
+        // SubmitThenPassthrough: commit the current preedit, then the raw key passes
+        // through to the application (no app in the CLI, so the output is dropped).
+        OutputAction::SubmitThenPassthrough(_) => mozc.submit().map(|_| None),
+        OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) => Ok(None),
         OutputAction::SendModifiedKey { key, mods } => {
             // CLI has no application to forward to; log and attempt Mozc routing.
             println!("  modified_key: mods={mods:#04b} key={key}");

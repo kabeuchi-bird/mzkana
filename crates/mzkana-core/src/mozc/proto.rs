@@ -68,6 +68,7 @@ pub mod special_key {
     pub const HOME: i32 = 16;
     pub const END: i32 = 17;
     pub const TAB: i32 = 18;
+    pub const F1: i32 = 19;   // F1..F12 are contiguous: F1=19 … F12=30
     pub const PAGE_UP: i32 = 31;
     pub const PAGE_DOWN: i32 = 32;
     pub const INSERT: i32 = 33;

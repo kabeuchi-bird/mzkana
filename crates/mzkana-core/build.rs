@@ -25,5 +25,12 @@ fn main() {
         )
         .expect("Failed to compile protos");
 
-    println!("cargo:rerun-if-changed={}", proto_dir.display());
+    // Watch each .proto file individually: a directory-level rerun-if-changed only
+    // fires when files are added/removed, not when an existing file's contents change.
+    for entry in std::fs::read_dir(&proto_dir).expect("read protocol dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_some_and(|ext| ext == "proto") {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }

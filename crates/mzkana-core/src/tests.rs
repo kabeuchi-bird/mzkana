@@ -1541,3 +1541,17 @@ fn c4_unassigned_key_outside_composition() {
         "unassigned key outside composition should be Passthrough, got {actions:?}"
     );
 }
+
+#[test]
+fn c4_unassigned_key_after_conversion_passes_through() {
+    // After Mozc enters CONVERSION (which clears tentative/pending), a new
+    // unassigned key starts fresh: process_key_down resets to Composition, so the
+    // key passes through rather than spuriously submitting an empty preedit.
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion();
+    let actions = m.process(InputEvent::down("x"), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::Passthrough("x".to_string())),
+        "unassigned key after conversion should be Passthrough, got {actions:?}"
+    );
+}

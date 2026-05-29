@@ -496,10 +496,10 @@ pub fn xkb_name_to_mozc_special(name: &str) -> Option<i32> {
         "Henkan"            => Some(special_key::HENKAN),
         "Muhenkan"          => Some(special_key::MUHENKAN),
         "Hiragana_Katakana" => Some(special_key::KANA),
-        // F1–F12: SpecialKey values 19–30
+        // F1–F12: contiguous SpecialKey values starting at F1 (19).
         s if s.starts_with('F') => s[1..].parse::<i32>().ok()
             .filter(|&n| (1..=12).contains(&n))
-            .map(|n| 18 + n),
+            .map(|n| special_key::F1 + (n - 1)),
         _ => None,
     }
 }
