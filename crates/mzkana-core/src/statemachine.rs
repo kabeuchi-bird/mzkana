@@ -631,12 +631,16 @@ impl StateMachine {
     fn apply_rule_match(&mut self, rule: RuleMatch, _now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
-        // Find tentative chars to rewrite
+        // Find tentative chars to rewrite. Only rewrite entries whose source keys
+        // are ALL part of this rule's key set — otherwise a chord that shares a key
+        // with a previously-confirmed char (e.g. [f,j]→が then [e,j]→で share 'j')
+        // would wrongly consume that earlier char too, deleting extra preedit.
+        let rule_keys: BTreeSet<&str> = rule.source_keys.iter().map(String::as_str).collect();
         let affected_count = self
             .tentative_buffer
             .iter()
             .rev()
-            .take_while(|tc| tc.source_keys.iter().any(|k| rule.source_keys.contains(k)))
+            .take_while(|tc| tc.source_keys.iter().all(|k| rule_keys.contains(k.as_str())))
             .count();
 
         // H1: emit one BackSpace per *Mozc preedit character*, not per TentativeChar —
@@ -870,17 +874,21 @@ impl StateMachine {
     fn fire_mutual_chord(&mut self, chord: crate::config::ChordRule, _now: Instant) -> Vec<OutputAction> {
         let chord_key_set: HashSet<String> = chord.keys.iter().cloned().collect();
 
-        // Pending keys that are part of this chord had speculative kana emitted.
-        let pending_chord: HashSet<String> = self.pending_keys.iter()
-            .map(|(k, _)| k.clone())
-            .filter(|k| chord_key_set.contains(k))
-            .collect();
-
+        // Rewrite only tentative chars whose source keys are ALL members of this
+        // chord. Matching on "any shared key" would also consume an earlier
+        // confirmed char that happens to share a key (e.g. [f,j]→が then [e,j]→で
+        // share 'j'), deleting extra preedit.
         let affected = self.tentative_buffer.iter().rev()
-            .take_while(|tc| tc.source_keys.iter().any(|k| pending_chord.contains(k)))
+            .take_while(|tc| tc.source_keys.iter().all(|k| chord_key_set.contains(k)))
             .count();
 
-        let mut actions: Vec<OutputAction> = std::iter::repeat_n(OutputAction::Backspace, affected).collect();
+        // H1: one BackSpace per Mozc preedit character across the affected entries.
+        let affected_chars: usize = self.tentative_buffer
+            [self.tentative_buffer.len() - affected..]
+            .iter()
+            .map(|tc| tc.mozc_char_len)
+            .sum();
+        let mut actions: Vec<OutputAction> = std::iter::repeat_n(OutputAction::Backspace, affected_chars).collect();
         self.tentative_buffer.truncate(self.tentative_buffer.len() - affected);
 
         self.pending_keys.retain(|(k, _)| !chord_key_set.contains(k));

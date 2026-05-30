@@ -183,17 +183,20 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
             preeditText.setCursor(static_cast<int>(preedit.size()));
         }
 
-        // H2: choose the preedit display strategy by client capability and the
-        // preedit_fallback setting (0=client, 1=panel, 2=buffer, 3=auto).
-        const int fallback = mzkana_engine_preedit_fallback(engine_);
+        // Preedit display:
+        //   - Clients that support inline preedit always get it inline
+        //     (setClientPreedit), which is what most apps render in-place.
+        //   - For clients that cannot, preedit_fallback decides the fallback:
+        //     buffer(2) shows nothing; client/panel/auto show the floating panel.
         const bool clientCapable =
             ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit);
 
-        if (clientCapable && fallback != 1 /* not forced to panel */) {
-            // Inline preedit in the client (preferred for capable clients).
+        if (clientCapable) {
+            // Inline preedit in the client. Also mirror to the panel so it stays
+            // visible if the client chooses not to render it.
             ic->inputPanel().setClientPreedit(preeditText);
-            ic->inputPanel().setPreedit(fcitx::Text());
-        } else if (fallback == 2 /* buffer */) {
+            ic->inputPanel().setPreedit(preeditText);
+        } else if (mzkana_engine_preedit_fallback(engine_) == 2 /* buffer */) {
             // Keep composing internally but show nothing.
             ic->inputPanel().setClientPreedit(fcitx::Text());
             ic->inputPanel().setPreedit(fcitx::Text());

@@ -340,6 +340,33 @@ fn mutual_chord_rollover() {
 }
 
 #[test]
+fn mutual_chord_after_chord_no_extra_backspace() {
+    // Regression: a mutual chord fully pressed and released, then a second mutual
+    // chord that reuses the shared key. The second chord must only rewrite its own
+    // speculative kana — it must NOT backspace the first chord's confirmed output
+    // just because the two chords share the 'j' key.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    // (f j) → が, then fully release both keys.
+    m.process(InputEvent::down("j"), now);
+    let a_fg = m.process(InputEvent::down("f"), now);
+    assert!(a_fg.contains(&OutputAction::SendKana("が".to_string())), "{a_fg:?}");
+    m.process(InputEvent::up("f"), now);
+    m.process(InputEvent::up("j"), now);
+    assert_eq!(m.tentative_kana_string(), "が");
+
+    // (e j) → で as a fresh chord. 'j' is shared with the (f j) chord, but 「が」
+    // is already confirmed and must survive untouched.
+    m.process(InputEvent::down("j"), now);
+    let a_ej = m.process(InputEvent::down("e"), now);
+    assert!(a_ej.contains(&OutputAction::SendKana("で".to_string())), "second chord must fire: {a_ej:?}");
+    assert!(!a_ej.contains(&OutputAction::Backspace), "「が」must not be backspaced: {a_ej:?}");
+    assert_eq!(m.tentative_kana_string(), "がで");
+}
+
+#[test]
 fn mutual_chord_no_timeout_after_window() {
     // symmetric=true chord fires regardless of timing — even well after chord_window_ms.
     let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
