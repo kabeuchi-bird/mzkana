@@ -99,6 +99,24 @@ struct TentativeChar {
     /// (chord deadline expired or no chord candidates). Used for sequences like
     /// `"、 !Enter"` whose leading kana is sent speculatively.
     pending_tail: Vec<String>,
+    /// Number of characters this kana occupies in the Mozc preedit. A single
+    /// keystroke can emit a multi-character kana ("きゃ", an alias expansion, a
+    /// composed kana), which `SendKana` inserts as that many preedit characters.
+    /// Rewrites/backspaces must remove exactly this many to keep the local buffer
+    /// and the Mozc preedit in lock-step (H1).
+    mozc_char_len: usize,
+}
+
+impl TentativeChar {
+    fn new(
+        kana: String,
+        source_keys: Vec<String>,
+        rewrite_deadline: Option<Instant>,
+        pending_tail: Vec<String>,
+    ) -> Self {
+        let mozc_char_len = kana.chars().count();
+        Self { kana, source_keys, rewrite_deadline, pending_tail, mozc_char_len }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,12 +316,12 @@ impl StateMachine {
                 return vec![OutputAction::Passthrough(key.to_string())];
             }
             let actions = vec![OutputAction::SendKana(mod_output.clone())];
-            self.tentative_buffer.push(TentativeChar {
-                kana: mod_output,
-                source_keys: vec![key.to_string()],
-                rewrite_deadline: None,
-                pending_tail: Vec::new(),
-            });
+            self.tentative_buffer.push(TentativeChar::new(
+                mod_output,
+                vec![key.to_string()],
+                None,
+                Vec::new(),
+            ));
             return actions;
         }
 
@@ -515,21 +533,21 @@ impl StateMachine {
             for t in &pending_tail {
                 actions.push(Self::make_output_action(t));
             }
-            self.tentative_buffer.push(TentativeChar {
+            self.tentative_buffer.push(TentativeChar::new(
                 kana,
-                source_keys: vec![key.to_string()],
-                rewrite_deadline: None,
-                pending_tail: Vec::new(),
-            });
+                vec![key.to_string()],
+                None,
+                Vec::new(),
+            ));
             return actions;
         };
 
-        self.tentative_buffer.push(TentativeChar {
+        self.tentative_buffer.push(TentativeChar::new(
             kana,
-            source_keys: vec![key.to_string()],
+            vec![key.to_string()],
             rewrite_deadline,
             pending_tail,
-        });
+        ));
 
         actions
     }
@@ -621,7 +639,14 @@ impl StateMachine {
             .take_while(|tc| tc.source_keys.iter().any(|k| rule.source_keys.contains(k)))
             .count();
 
-        for _ in 0..affected_count {
+        // H1: emit one BackSpace per *Mozc preedit character*, not per TentativeChar —
+        // a single tentative entry may hold a multi-character kana.
+        let affected_chars: usize = self.tentative_buffer
+            [self.tentative_buffer.len() - affected_count..]
+            .iter()
+            .map(|tc| tc.mozc_char_len)
+            .sum();
+        for _ in 0..affected_chars {
             actions.push(OutputAction::Backspace);
         }
         self.tentative_buffer
@@ -773,10 +798,11 @@ impl StateMachine {
     // ── Backspace handling ────────────────────────────────────────────────────
 
     fn handle_backspace(&mut self) -> Vec<OutputAction> {
-        if !self.tentative_buffer.is_empty() {
-            self.tentative_buffer.pop();
+        if let Some(tc) = self.tentative_buffer.pop() {
+            // H1: removing the last tentative unit deletes all of its Mozc preedit
+            // characters (a unit may be a multi-character kana).
             self.pending_keys.clear();
-            vec![OutputAction::Backspace]
+            std::iter::repeat_n(OutputAction::Backspace, tc.mozc_char_len).collect()
         } else if !self.pending_keys.is_empty() {
             // Partial prefix/direct sequence in progress — discard silently
             self.pending_keys.clear();
@@ -1018,12 +1044,12 @@ impl StateMachine {
             );
             actions.push(action);
             if !skip_tentative {
-                self.tentative_buffer.push(TentativeChar {
-                    kana: token.to_string(),
-                    source_keys: source_keys.clone(),
+                self.tentative_buffer.push(TentativeChar::new(
+                    token.to_string(),
+                    source_keys.clone(),
                     rewrite_deadline,
-                    pending_tail: Vec::new(),
-                });
+                    Vec::new(),
+                ));
             }
         }
         actions
@@ -1031,7 +1057,8 @@ impl StateMachine {
 
     /// Emit backspaces for all tentative chars (used before kanchoku commit, reset, etc.)
     fn flush_tentative(&mut self) -> Vec<OutputAction> {
-        let count = self.tentative_buffer.len();
+        // H1: one BackSpace per Mozc preedit character across all tentative entries.
+        let count: usize = self.tentative_buffer.iter().map(|tc| tc.mozc_char_len).sum();
         self.tentative_buffer.clear();
         std::iter::repeat_n(OutputAction::Backspace, count).collect()
     }
