@@ -1099,6 +1099,11 @@ impl StateMachine {
         self.direct_trigger_state == DirectTriggerState::Active
             || self.layout.meta.mode == LayoutMode::Kanchoku
     }
+
+    /// Access the layout's global `[settings]` (for the engine / FFI layer).
+    pub fn settings(&self) -> &crate::config::Settings {
+        &self.layout.settings
+    }
 }
 
 // ── Internal helper ───────────────────────────────────────────────────────────

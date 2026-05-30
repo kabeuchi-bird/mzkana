@@ -2,6 +2,7 @@
 
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
+#include <fcitx-utils/capabilityflags.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputmethodentry.h>
@@ -44,6 +45,15 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
 
     auto *ic = keyEvent.inputContext();
     const fcitx::Key &key = keyEvent.key();
+
+    // H2/H3: sensitive (password) fields. Honor sensitive_field_behavior:
+    //   passthrough(0) / disable(1) → don't run the IME, let the app handle keys
+    //   (no preedit is ever shown, so nothing is exposed); kana(2) → process normally.
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
+        if (mzkana_engine_sensitive_field_behavior(engine_) != 2) {
+            return;
+        }
+    }
 
     // Skip Ctrl / Alt / Super / Hyper — let the application handle these.
     fcitx::KeyStates badMods = {
@@ -112,9 +122,13 @@ void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
         fcitx::UserInterfaceComponent::StatusArea);
 }
 
-void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry &entry,
+void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry & /*entry*/,
                                     fcitx::InputContextEvent &event) {
-    reset(entry, event);
+    // H3: honor on_focus_change (preserve / commit / clear) on focus loss.
+    if (engine_) {
+        mzkana_engine_focus_out(engine_);
+    }
+    clearPreedit(event.inputContext());
 }
 
 void MzkanaFcitxEngine::reset(const fcitx::InputMethodEntry & /*entry*/,
@@ -161,10 +175,22 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
             preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
             preeditText.setCursor(static_cast<int>(preedit.size()));
         }
-        // setClientPreedit → inline in capable clients
-        // setPreedit → floating panel as fallback
-        ic->inputPanel().setClientPreedit(preeditText);
-        ic->inputPanel().setPreedit(preeditText);
+        // H2: choose the preedit display strategy by client capability.
+        // Clients that support inline preedit get setClientPreedit; otherwise fall
+        // back per the preedit_fallback setting (panel / none).
+        if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
+            ic->inputPanel().setClientPreedit(preeditText);
+            ic->inputPanel().setPreedit(fcitx::Text());
+        } else {
+            ic->inputPanel().setClientPreedit(fcitx::Text());
+            // 0 = panel (floating), 2 = none. (commit fallback is handled by the
+            // engine via direct commits, so here it behaves like "none".)
+            if (mzkana_engine_preedit_fallback(engine_) == 0) {
+                ic->inputPanel().setPreedit(preeditText);
+            } else {
+                ic->inputPanel().setPreedit(fcitx::Text());
+            }
+        }
         ic->updatePreedit();
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
         lastPreedit_ = preedit;

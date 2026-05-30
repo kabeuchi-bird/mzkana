@@ -225,6 +225,38 @@ pub unsafe extern "C" fn mzkana_engine_reset(engine: *mut MzkanaEngine) {
     }
 }
 
+/// Handle focus loss, honoring the layout's `on_focus_change` setting
+/// (preserve / commit / clear). Call from the C++ `deactivate` handler.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_focus_out(engine: *mut MzkanaEngine) {
+    if let Some(engine) = engine.as_mut() {
+        engine.0.focus_out();
+    }
+}
+
+/// `sensitive_field_behavior` setting (0 = passthrough, 1 = disable, 2 = kana).
+/// Returns 0 for a NULL engine.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_sensitive_field_behavior(engine: *const MzkanaEngine) -> i32 {
+    engine.as_ref().map_or(0, |e| e.0.sensitive_field_behavior())
+}
+
+/// `preedit_fallback` setting (0 = panel, 1 = commit, 2 = none).
+/// Returns 0 for a NULL engine.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_preedit_fallback(engine: *const MzkanaEngine) -> i32 {
+    engine.as_ref().map_or(0, |e| e.0.preedit_fallback())
+}
+
 /// Check whether the config file changed and reload it if so.
 ///
 /// Returns 1 if the config was reloaded, 0 otherwise.

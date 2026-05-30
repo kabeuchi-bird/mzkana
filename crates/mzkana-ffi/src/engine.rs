@@ -3,7 +3,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use mzkana_core::{
-    load_layout, InputEvent, MozcOutput, MozcWorker, Op, OutputAction, StateMachine, WorkerError,
+    load_layout, InputEvent, MozcOutput, MozcWorker, Op, OnFocusChange,
+    OutputAction, PreeditFallback, SensitiveFieldBehavior, StateMachine, WorkerError,
 };
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -179,6 +180,46 @@ impl Engine {
             }
         }
         self.preedit.clear();
+    }
+
+    /// Handle focus loss (IM deactivation), honoring the `on_focus_change` setting (H3).
+    pub fn focus_out(&mut self) {
+        match self.sm.settings().on_focus_change {
+            // Keep the in-progress composition so it resumes when focus returns.
+            OnFocusChange::Preserve => {}
+            // Finalize the current Mozc preedit as-is.
+            OnFocusChange::Commit => {
+                self.sm.reset();
+                if let Some(ref mut mozc) = self.mozc {
+                    if mozc.batch(vec![Op::Submit]).is_err() {
+                        self.mozc = None;
+                    }
+                }
+                self.preedit.clear();
+            }
+            // Discard the in-progress composition (revert).
+            OnFocusChange::Clear => self.reset(),
+        }
+    }
+
+    /// `sensitive_field_behavior` setting as an int for the FFI/C++ layer
+    /// (0 = passthrough, 1 = disable, 2 = kana).
+    pub fn sensitive_field_behavior(&self) -> i32 {
+        match self.sm.settings().sensitive_field_behavior {
+            SensitiveFieldBehavior::Passthrough => 0,
+            SensitiveFieldBehavior::Disable => 1,
+            SensitiveFieldBehavior::Kana => 2,
+        }
+    }
+
+    /// `preedit_fallback` setting as an int for the FFI/C++ layer
+    /// (0 = panel, 1 = commit, 2 = none).
+    pub fn preedit_fallback(&self) -> i32 {
+        match self.sm.settings().preedit_fallback {
+            PreeditFallback::Panel => 0,
+            PreeditFallback::Commit => 1,
+            PreeditFallback::None => 2,
+        }
     }
 
     /// Translate an `OutputAction` into the Mozc op it issues, if any.
