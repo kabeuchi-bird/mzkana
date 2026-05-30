@@ -1575,13 +1575,80 @@ fn c4_unassigned_key_outside_composition() {
 #[test]
 fn c4_unassigned_key_after_conversion_passes_through() {
     // After Mozc enters CONVERSION (which clears tentative/pending), a new
-    // unassigned key starts fresh: process_key_down resets to Composition, so the
-    // key passes through rather than spuriously submitting an empty preedit.
+    // unassigned NON-CONTROL key starts fresh: process_key_down resets to
+    // Composition, so the key passes through rather than spuriously submitting.
     let mut m = c4_sm_composing();
     m.notify_mozc_conversion();
     let actions = m.process(InputEvent::down("x"), Instant::now());
     assert!(
         actions.contains(&OutputAction::Passthrough("x".to_string())),
-        "unassigned key after conversion should be Passthrough, got {actions:?}"
+        "unassigned non-control key after conversion should be Passthrough, got {actions:?}"
+    );
+}
+
+// ── Conversion-mode candidate cycling (Henkan, space) ───────────────────────────
+
+#[test]
+fn conversion_mode_henkan_cycles_repeatedly() {
+    // The conversion key must keep reaching Mozc on every press so candidates can
+    // be cycled — it must NOT reset composition after the first conversion.
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion(); // Mozc reported a highlighted candidate.
+
+    let a1 = m.process(InputEvent::down("Henkan"), Instant::now());
+    assert!(
+        a1.contains(&OutputAction::SendFunctionKey("Henkan".to_string())),
+        "1st Henkan during conversion should reach Mozc, got {a1:?}"
+    );
+    // Still in conversion: a second Henkan must ALSO reach Mozc (next candidate).
+    let a2 = m.process(InputEvent::down("Henkan"), Instant::now());
+    assert!(
+        a2.contains(&OutputAction::SendFunctionKey("Henkan".to_string())),
+        "2nd Henkan during conversion should also reach Mozc, got {a2:?}"
+    );
+}
+
+#[test]
+fn conversion_mode_non_control_key_resets_and_composes() {
+    // A normal kana key during conversion starts a fresh composition.
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion();
+    let a = m.process(InputEvent::down("a"), Instant::now());
+    assert!(
+        a.iter().any(|x| matches!(x, OutputAction::SendKana(_))),
+        "non-control key during conversion should start fresh composition, got {a:?}"
+    );
+}
+
+#[test]
+fn space_tap_triggers_conversion_while_composing() {
+    // Center-shift layouts (naginata) bind space as a hold modifier whose tap
+    // passes through. While composing, a space tap must instead reach Mozc to
+    // trigger conversion (issue: space did nothing in center-shift layouts).
+    let mut m = sm(NAGINATA);
+    let now = Instant::now();
+    // Build a composition: j → あ (speculative).
+    let _ = m.process(InputEvent::down("j"), now);
+    let _ = m.process(InputEvent::up("j"), now);
+    assert!(!m.tentative_kana_string().is_empty(), "j should start composition");
+    // Space tap (down then up, no interrupting key) while composing.
+    let _ = m.process(InputEvent::down("space"), now);
+    let up = m.process(InputEvent::up("space"), now);
+    assert!(
+        up.contains(&OutputAction::SendFunctionKey("space".to_string())),
+        "space tap while composing should trigger Mozc conversion, got {up:?}"
+    );
+}
+
+#[test]
+fn space_tap_passes_through_when_idle() {
+    // With no active composition, a space tap is a literal space for the app.
+    let mut m = sm(NAGINATA);
+    let now = Instant::now();
+    let _ = m.process(InputEvent::down("space"), now);
+    let up = m.process(InputEvent::up("space"), now);
+    assert!(
+        up.contains(&OutputAction::Passthrough("space".to_string())),
+        "idle space tap should pass through, got {up:?}"
     );
 }

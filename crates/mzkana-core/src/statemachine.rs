@@ -271,8 +271,11 @@ impl StateMachine {
             return self.handle_backspace();
         }
 
-        // CONVERSION mode: new key starts fresh composition
-        if self.mozc_mode == MozcMode::Conversion {
+        // CONVERSION mode: a non-control key starts fresh composition. Control keys
+        // (Henkan / space / arrows / Return / Escape …) continue the active
+        // conversion — they must reach Mozc to cycle candidates, move segments, or
+        // commit — so leave the mode and buffers intact for them.
+        if self.mozc_mode == MozcMode::Conversion && !Self::is_mozc_control_key(key) {
             self.tentative_buffer.clear();
             self.pending_keys.clear();
             self.mozc_mode = MozcMode::Composition;
@@ -339,6 +342,14 @@ impl StateMachine {
             if !was_interrupted && !had_oneshot {
                 match modifier_def.tap_action {
                     TapAction::Passthrough => {
+                        // A modifier whose tap passes through (e.g. the center-shift
+                        // space in naginata layouts). While a composition is active,
+                        // a tap of a Mozc control key (space → convert) must go to
+                        // Mozc instead of the application; otherwise it would never
+                        // trigger conversion. Idle taps still pass through.
+                        if self.is_composing() && Self::is_mozc_control_key(key) {
+                            return vec![OutputAction::SendFunctionKey(key.to_string())];
+                        }
                         return vec![OutputAction::Passthrough(key.to_string())];
                     }
                     TapAction::BaseKana => {
@@ -419,10 +430,7 @@ impl StateMachine {
                 self.pending_keys.pop();
 
                 // C4: Key routing for unassigned keys during composition.
-                // Check if we're actively composing (have sent kana to Mozc).
-                let is_composing = !self.tentative_buffer.is_empty() || self.mozc_mode == MozcMode::Conversion;
-
-                if is_composing {
+                if self.is_composing() {
                     // During active composition, route the key based on type:
                     // - Control keys (space, Return, etc.) → SendFunctionKey (send to Mozc)
                     // - Other keys → SubmitThenPassthrough (confirm preedit, then pass to app)
@@ -1026,6 +1034,13 @@ impl StateMachine {
         let count = self.tentative_buffer.len();
         self.tentative_buffer.clear();
         std::iter::repeat_n(OutputAction::Backspace, count).collect()
+    }
+
+    /// True while a Mozc composition/conversion is active: there is speculative
+    /// kana in the tentative buffer, or Mozc has reported CONVERSION mode.
+    /// Control keys (space, Henkan, …) are routed to Mozc while this holds.
+    fn is_composing(&self) -> bool {
+        !self.tentative_buffer.is_empty() || self.mozc_mode == MozcMode::Conversion
     }
 
     // ── Mozc output feedback ──────────────────────────────────────────────────
