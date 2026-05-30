@@ -85,8 +85,12 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
         keyEvent.filterAndAccept();
     }
 
-    // Hot-reload: check on every key event (inotify debounce makes this cheap)
-    mzkana_engine_check_reload(engine_);
+    // Hot-reload: check on every key event (inotify debounce makes this cheap).
+    // On reload the composition is reverted in the engine, so clear the now-stale
+    // preedit from the UI too (H4).
+    if (mzkana_engine_check_reload(engine_)) {
+        clearPreedit(ic);
+    }
 
     // Update status area if Mozc availability changed (e.g. reconnected after startup).
     bool nowAvailable = mzkana_engine_mozc_available(engine_);

@@ -92,6 +92,16 @@ impl Engine {
 
         match reloaded {
             Some(layout) => {
+                // H4: clear the in-flight composition before swapping configs.
+                // Replacing the StateMachine drops its tentative buffer, so without
+                // this the speculative kana already sent to Mozc would be orphaned
+                // in the Mozc preedit. Revert cancels it cleanly first.
+                self.sm.reset();
+                if let Some(ref mut mozc) = self.mozc {
+                    if mozc.batch(vec![Op::Revert]).is_err() {
+                        self.mozc = None;
+                    }
+                }
                 self.sm = StateMachine::new(layout);
                 self.preedit.clear();
                 tracing::info!("config reloaded from {}", self.config_path.display());
