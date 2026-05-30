@@ -8,8 +8,9 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 - **配列不問** — TOML 設定ファイルを差し替えるだけで任意のかな配列を使用できます
 - **6 つのシフト方式に対応** — 通常シフト / 同時シフト / 前置シフト / 後置シフト / 相互シフト / センターシフト
 - **漢直サポート** — T-code / TUT-code など 2 ストローク漢字直接入力に対応
-- **投機的送信** — 入力をリアルタイムに Mozc へ送り、後から確定・書き換え（BS-rewrite）
+- **投機的送信** — 入力をリアルタイムに Mozc へ送り、後から確定・書き換え（BS-rewrite）。同時打鍵は `chord_window_ms` の時間枠内のキーのみを対象に判定
 - **Mozc IPC クライアント** — Unix ドメインソケット経由で mozc_server に直接接続。起動していなければ自動起動し、切断時は次のキーイベントで自動再接続
+- **UI 非凍結保証** — Mozc IPC は専用ワーカースレッドで実行し、1 打鍵あたり 150ms のハードタイムアウトを適用。mozc_server が遅延・ハングしてもデスクトップ入力は固まりません
 - **機能キー出力** — `!Return` / `!Tab` など機能キーをグリッドや chord に埋め込み可能
 - **修飾キー記法** — `C-z`（Ctrl+z）/ `S-!Left`（Shift+左）などを出力トークンとして指定可能
 - **エイリアス / 複数トークン出力** — `[[alias]]` で名前付きシーケンスを定義し、グリッドや chord から参照
@@ -22,7 +23,8 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 mzkana/
 ├── crates/
 │   ├── mzkana-core/        # 状態機械・設定パーサ・Mozc IPCクライアント（ライブラリ）
-│   │   └── src/mozc/       # protobufコーデック + UDSクライアント
+│   │   ├── src/mozc/       # prost生成protobuf型 + UDSクライアント + ワーカースレッド
+│   │   └── protocol/       # vendor した Mozc commands.proto（ビルド時に prost-build で生成）
 │   ├── mzkana-cli/         # 検証・デバッグ用 CLI ツール
 │   └── mzkana-ffi/         # C ABI ラッパー（cbindgen で mzkana.h を生成）
 ├── fcitx5-addon/           # Fcitx5 C++ アドオン
@@ -307,8 +309,9 @@ output = "A-!F4"      # Alt+F4
 - **接続先**: Linux 抽象ソケット（`/proc/net/unix` から自動検出）、フォールバックとして `~/.mozc/session.sock`（`--socket` で変更可）
 - **プロトコル**: raw `Input` protobuf バイト列を送信 → `shutdown(SHUT_WR)` で終端通知 → raw `Output` protobuf バイト列を EOF まで受信（長さプレフィックスなし、`unix_ipc.cc` / `session_server.cc` で確認済み）
 - **認証**: SO_PEERCRED によるカーネル UID 照合（mozc_server が同 UID かを検証）
-- **外部依存**: prost / protoc 不要（Mozc の proto2 group 型に対応した独自コーデックを内蔵）
-- **セッション管理**: 接続時に `CREATE_SESSION`、切断時に `DELETE_SESSION` を自動実行
+- **protobuf**: 公式 `commands.proto`（および推移的 import）を vendor し、`prost-build` + `protoc-bin-vendored` でビルド時にコード生成（システム protoc 不要・ネットワーク不要）
+- **セッション管理**: 接続時に `CREATE_SESSION` → `TURN_ON_IME`（HIRAGANA 合成モードへ初期化。既定の DIRECT のままでは入力が composer に入らない）、切断時に `DELETE_SESSION` を自動実行
+- **ワーカースレッド**: IPC は専用スレッドで実行し、UI スレッドは 150ms のハードタイムアウトで応答待ち。超過時は接続を破棄して次イベントで再接続し、当該キーは未確定のまま素通し（ソケット自体の read/write タイムアウトは 1 秒）
 - **自動起動**: `mozc_server` が未起動の場合、`/usr/lib/mozc/mozc_server` などを検索して自動起動（最大 500 ms 待機）
 - **自動再接続**: 切断検出後、次のキーイベントで 5 秒バックオフ付きで再接続を試みる
 
@@ -332,7 +335,7 @@ MzkanaEngine  (mzkana-core)
 ```
 
 - `mzkana_engine_key_down` / `mzkana_engine_key_up` — キーイベントを処理し `MzkanaResult` を返す
-- `mzkana_engine_tick` — chord ウィンドウタイマーを進める
+- `mzkana_engine_tick` — 内部タイマーを進める（chord 確定・期限切れ pending の除去・複合出力末尾の emit）。C++ 層が preedit 非空の間だけ約 10ms 周期の fcitx5 タイマー（`EventSourceTime`）から呼び出す
 - `mzkana_engine_check_reload` — inotify でレイアウトファイルの変更を検出し自動リロード
 - `mzkana_engine_reset` — フォーカス喪失・IM 切り替え時に状態をリセット
 - `mzkana_engine_mozc_available` — Mozc 接続状態を返す（ステータスバー表示に使用）
@@ -354,7 +357,7 @@ MzkanaEngine  (mzkana-core)
 cargo test
 ```
 
-71 件のテストがあります。Mozc のインストールは不要です。
+75 件のテストがあります。Mozc のインストールは不要です。
 
 ## ライセンス
 
