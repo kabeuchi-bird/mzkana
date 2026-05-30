@@ -122,6 +122,16 @@ fn cmd_validate(path: &Path) {
         layout.chords.len(),
         layout.directs.len()
     );
+
+    let conflicts = mzkana_core::analyze_conflicts(&layout);
+    if conflicts.is_empty() {
+        println!("conflicts: none");
+    } else {
+        println!("conflicts: {}", conflicts.len());
+        for c in &conflicts {
+            println!("  ⚠ {}", c.message);
+        }
+    }
 }
 
 fn cmd_run(path: &Path, keys: &str) {

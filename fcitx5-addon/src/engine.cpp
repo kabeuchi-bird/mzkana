@@ -46,11 +46,13 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
     auto *ic = keyEvent.inputContext();
     const fcitx::Key &key = keyEvent.key();
 
-    // H2/H3: sensitive (password) fields. Honor sensitive_field_behavior:
-    //   passthrough(0) / disable(1) → don't run the IME, let the app handle keys
-    //   (no preedit is ever shown, so nothing is exposed); kana(2) → process normally.
+    // H2: sensitive (password) fields. Honor sensitive_field_behavior:
+    //   passthrough(0) → don't run the IME, let the app handle keys (nothing exposed).
+    //   buffer(1)      → process normally but the preedit is never shown in such
+    //                    fields (applyResult suppresses it below), so kana still
+    //                    composes without leaking to the panel.
     if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
-        if (mzkana_engine_sensitive_field_behavior(engine_) != 2) {
+        if (mzkana_engine_sensitive_field_behavior(engine_) == 0) {
             return;
         }
     }
@@ -170,26 +172,35 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
     // tick timer (C2) cheap: a pure pruning/deadline tick that leaves the preedit
     // unchanged costs no UI update.
     if (preedit != lastPreedit_) {
+        // H2: never show a preedit in a password/sensitive field — it would leak
+        // what is being typed to the floating panel.
+        const bool sensitive =
+            ic->capabilityFlags().test(fcitx::CapabilityFlag::Password);
+
         fcitx::Text preeditText;
-        if (!preedit.empty()) {
+        if (!preedit.empty() && !sensitive) {
             preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
             preeditText.setCursor(static_cast<int>(preedit.size()));
         }
-        // H2: choose the preedit display strategy by client capability.
-        // Clients that support inline preedit get setClientPreedit; otherwise fall
-        // back per the preedit_fallback setting (panel / none).
-        if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
+
+        // H2: choose the preedit display strategy by client capability and the
+        // preedit_fallback setting (0=client, 1=panel, 2=buffer, 3=auto).
+        const int fallback = mzkana_engine_preedit_fallback(engine_);
+        const bool clientCapable =
+            ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit);
+
+        if (clientCapable && fallback != 1 /* not forced to panel */) {
+            // Inline preedit in the client (preferred for capable clients).
             ic->inputPanel().setClientPreedit(preeditText);
             ic->inputPanel().setPreedit(fcitx::Text());
-        } else {
+        } else if (fallback == 2 /* buffer */) {
+            // Keep composing internally but show nothing.
             ic->inputPanel().setClientPreedit(fcitx::Text());
-            // 0 = panel (floating), 2 = none. (commit fallback is handled by the
-            // engine via direct commits, so here it behaves like "none".)
-            if (mzkana_engine_preedit_fallback(engine_) == 0) {
-                ic->inputPanel().setPreedit(preeditText);
-            } else {
-                ic->inputPanel().setPreedit(fcitx::Text());
-            }
+            ic->inputPanel().setPreedit(fcitx::Text());
+        } else {
+            // Floating panel fallback (client/panel/auto for non-inline clients).
+            ic->inputPanel().setClientPreedit(fcitx::Text());
+            ic->inputPanel().setPreedit(preeditText);
         }
         ic->updatePreedit();
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);

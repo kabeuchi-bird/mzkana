@@ -187,38 +187,28 @@ impl Engine {
         match self.sm.settings().on_focus_change {
             // Keep the in-progress composition so it resumes when focus returns.
             OnFocusChange::Preserve => {}
-            // Finalize the current Mozc preedit as-is.
-            OnFocusChange::Commit => {
-                self.sm.reset();
-                if let Some(ref mut mozc) = self.mozc {
-                    if mozc.batch(vec![Op::Submit]).is_err() {
-                        self.mozc = None;
-                    }
-                }
-                self.preedit.clear();
-            }
-            // Discard the in-progress composition (revert).
-            OnFocusChange::Clear => self.reset(),
+            // Discard the in-progress composition (revert + clear preedit).
+            OnFocusChange::Reset => self.reset(),
         }
     }
 
     /// `sensitive_field_behavior` setting as an int for the FFI/C++ layer
-    /// (0 = passthrough, 1 = disable, 2 = kana).
+    /// (0 = passthrough, 1 = buffer).
     pub fn sensitive_field_behavior(&self) -> i32 {
         match self.sm.settings().sensitive_field_behavior {
             SensitiveFieldBehavior::Passthrough => 0,
-            SensitiveFieldBehavior::Disable => 1,
-            SensitiveFieldBehavior::Kana => 2,
+            SensitiveFieldBehavior::Buffer => 1,
         }
     }
 
     /// `preedit_fallback` setting as an int for the FFI/C++ layer
-    /// (0 = panel, 1 = commit, 2 = none).
+    /// (0 = client, 1 = panel, 2 = buffer, 3 = auto).
     pub fn preedit_fallback(&self) -> i32 {
         match self.sm.settings().preedit_fallback {
-            PreeditFallback::Panel => 0,
-            PreeditFallback::Commit => 1,
-            PreeditFallback::None => 2,
+            PreeditFallback::Client => 0,
+            PreeditFallback::Panel => 1,
+            PreeditFallback::Buffer => 2,
+            PreeditFallback::Auto => 3,
         }
     }
 

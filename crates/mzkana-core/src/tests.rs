@@ -1652,3 +1652,92 @@ fn space_tap_passes_through_when_idle() {
         "idle space tap should pass through, got {up:?}"
     );
 }
+
+// ── H5: conflict analysis ───────────────────────────────────────────────────────
+
+#[test]
+fn h5_detects_multi_role_key() {
+    // 'd' is both a center-shift modifier and a prefix trigger → ambiguous role.
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. q
+1 か
+"""
+[[layer]]
+id = "pre"
+kind = "prefix"
+trigger = "d"
+grid = """
+. q
+1 ぱ
+"""
+[[modifier]]
+id = "m"
+key = "d"
+kind = "hold"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let conflicts = crate::config::analyze_conflicts(&layout);
+    assert!(
+        conflicts.iter().any(|c| c.message.contains("multiple roles")),
+        "expected a multi-role conflict, got {conflicts:?}"
+    );
+}
+
+#[test]
+fn h5_detects_duplicate_chord() {
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. q w
+1 か き
+"""
+[[chord]]
+keys = ["q", "w"]
+output = "を"
+[[chord]]
+keys = ["w", "q"]
+output = "ん"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let conflicts = crate::config::analyze_conflicts(&layout);
+    assert!(
+        conflicts.iter().any(|c| c.message.contains("more than once")),
+        "expected a duplicate-chord conflict, got {conflicts:?}"
+    );
+}
+
+#[test]
+fn h5_clean_layout_has_no_conflicts() {
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. q w
+1 か き
+"""
+[[chord]]
+keys = ["q", "w"]
+output = "を"
+"#;
+    let layout = load_layout(toml).unwrap();
+    assert!(crate::config::analyze_conflicts(&layout).is_empty());
+}
