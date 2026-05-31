@@ -367,6 +367,35 @@ fn mutual_chord_after_chord_no_extra_backspace() {
 }
 
 #[test]
+fn mutual_chord_lingering_key_does_not_refire() {
+    // Regression (fast rolling): the first chord's key is released LATE, so it
+    // lingers in held_keys while the next chord is typed. The lingering key must
+    // not re-fire its old chord — the new chord's own key takes precedence.
+    //   が = (f j); then with f still held, type e+j → で (not another が).
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    m.process(InputEvent::down("f"), now);
+    let a_g = m.process(InputEvent::down("j"), now);
+    assert!(a_g.contains(&OutputAction::SendKana("が".to_string())), "{a_g:?}");
+    m.process(InputEvent::up("j"), now); // release j, but f lingers (no f-up yet)
+
+    // e+j while f is still physically held.
+    m.process(InputEvent::down("e"), now);
+    let a_de = m.process(InputEvent::down("j"), now);
+    assert!(
+        a_de.contains(&OutputAction::SendKana("で".to_string())),
+        "lingering 'f' must not re-fire (f,j)→が; expected (e,j)→で: {a_de:?}"
+    );
+    assert!(
+        !a_de.contains(&OutputAction::SendKana("が".to_string())),
+        "stale chord (f,j)→が must not re-fire: {a_de:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "がで");
+}
+
+#[test]
 fn mutual_chord_no_timeout_after_window() {
     // symmetric=true chord fires regardless of timing — even well after chord_window_ms.
     let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();

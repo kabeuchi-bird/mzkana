@@ -161,6 +161,11 @@ pub struct StateMachine {
     chord_deadline: Option<Instant>,
     /// Physically held regular (non-modifier, non-trigger) keys, for mutual chord detection.
     held_keys: HashSet<String>,
+    /// Keys already consumed by a fired mutual chord but not yet physically
+    /// released. They stay in `held_keys` during fast rolling input, but must not
+    /// participate in another mutual chord until released (prevents a lingering
+    /// key from re-firing its old chord). Cleared per key on key-up.
+    chord_consumed_keys: HashSet<String>,
 }
 
 impl StateMachine {
@@ -188,6 +193,7 @@ impl StateMachine {
             mozc_mode: MozcMode::Composition,
             chord_deadline: None,
             held_keys: HashSet::new(),
+            chord_consumed_keys: HashSet::new(),
         }
     }
 
@@ -206,6 +212,7 @@ impl StateMachine {
         self.direct_trigger_state = DirectTriggerState::Inactive;
         self.direct_trigger_interrupted = false;
         self.held_keys.clear();
+        self.chord_consumed_keys.clear();
         actions
     }
 
@@ -340,6 +347,8 @@ impl StateMachine {
 
     fn process_key_up(&mut self, key: &str, now: Instant) -> Vec<OutputAction> {
         self.held_keys.remove(key);
+        // Once physically released, the key is free to take part in a new chord.
+        self.chord_consumed_keys.remove(key);
 
         // Modifier key released
         if let Some(idx) = self.modifier_index(key) {
@@ -856,17 +865,34 @@ impl StateMachine {
         self.layout.modifiers.iter().position(|m| m.key == key)
     }
 
-    /// Return the first mutual chord (symmetric=true) whose key set is a subset of
-    /// `held_keys` and that includes `new_key`. Called before the new key enters pending_keys.
+    /// Return the mutual chord (symmetric=true) that `new_key` completes.
+    /// Called before the new key enters `pending_keys`.
+    ///
+    /// Two-pass matching disambiguates a held key that lingers after its chord
+    /// fired (fast rolling input where the release arrives late) from a held key
+    /// intentionally used as a rolling shift:
+    ///   1. Prefer a chord whose partner keys are all FRESH (not already consumed
+    ///      by a prior chord). This lets (e,j)→で win over a stale (f,j) when 'f'
+    ///      is merely lingering unreleased.
+    ///   2. Only if no fresh chord matches, allow a consumed partner — this is the
+    ///      genuine rolling case where the shared key is held across chords
+    ///      (e.g. hold 'j', tap 'f' then 'e' → が, で).
+    ///
+    /// In both passes every chord key must be physically held.
     fn find_mutual_chord_match(&self, new_key: &str) -> Option<crate::config::ChordRule> {
-        for chord in &self.layout.chords {
-            if !chord.symmetric { continue; }
-            if !chord.keys.iter().any(|k| k == new_key) { continue; }
-            if chord.keys.iter().all(|k| self.held_keys.contains(k)) {
-                return Some(chord.clone());
-            }
-        }
-        None
+        let matches = |require_fresh_partners: bool| {
+            self.layout.chords.iter().find(|chord| {
+                chord.symmetric
+                    && chord.keys.iter().any(|k| k == new_key)
+                    && chord.keys.iter().all(|k| self.held_keys.contains(k))
+                    && (!require_fresh_partners
+                        || chord
+                            .keys
+                            .iter()
+                            .all(|k| k == new_key || !self.chord_consumed_keys.contains(k)))
+            })
+        };
+        matches(true).or_else(|| matches(false)).cloned()
     }
 
     /// Fire a mutual chord: rewrite any speculative emissions from pending chord keys,
@@ -892,6 +918,11 @@ impl StateMachine {
         self.tentative_buffer.truncate(self.tentative_buffer.len() - affected);
 
         self.pending_keys.retain(|(k, _)| !chord_key_set.contains(k));
+        // Mark all chord keys consumed: while still physically held they must not
+        // re-fire this chord during fast rolling input (see find_mutual_chord_match).
+        for k in &chord.keys {
+            self.chord_consumed_keys.insert(k.clone());
+        }
 
         let output = chord.output.clone();
         let source_keys = chord.keys.clone();
