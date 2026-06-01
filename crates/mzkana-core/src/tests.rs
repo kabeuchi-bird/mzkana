@@ -396,6 +396,32 @@ fn mutual_chord_lingering_key_does_not_refire() {
 }
 
 #[test]
+fn mutual_chord_after_singles_sharing_keys() {
+    // Regression (あかが): single kana whose keys overlap the next chord's keys
+    // must stay committed. あ=j, か=f, が=(f,j). Typing あ か then が must only
+    // rewrite the immediately-preceding speculative kana, not the already-released
+    // あ/か — they are confirmed on key-up.
+    let layout = load_layout(NAGINATA).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    m.process(InputEvent::down("j"), now); // あ
+    m.process(InputEvent::up("j"), now);
+    m.process(InputEvent::down("f"), now); // か
+    m.process(InputEvent::up("f"), now);
+    assert_eq!(m.tentative_kana_string(), "あか");
+
+    // が = f+j. Only one BackSpace expected (for the just-typed speculative か… but
+    // here か was already released → confirmed, so NO backspace at all).
+    m.process(InputEvent::down("f"), now);
+    let a_ga = m.process(InputEvent::down("j"), now);
+    assert!(a_ga.contains(&OutputAction::SendKana("が".to_string())), "{a_ga:?}");
+    let bs = a_ga.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert!(bs <= 1, "committed あか must not be backspaced; got {bs} BackSpaces: {a_ga:?}");
+    assert_eq!(m.tentative_kana_string(), "あかが", "{a_ga:?}");
+}
+
+#[test]
 fn mutual_chord_no_timeout_after_window() {
     // symmetric=true chord fires regardless of timing — even well after chord_window_ms.
     let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();

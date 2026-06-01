@@ -105,6 +105,11 @@ struct TentativeChar {
     /// Rewrites/backspaces must remove exactly this many to keep the local buffer
     /// and the Mozc preedit in lock-step (H1).
     mozc_char_len: usize,
+    /// True once one of this char's source keys has been physically released. A
+    /// confirmed char is "locked in" and must never be rewritten by a later chord,
+    /// even if its source keys happen to be a subset of that chord's keys (e.g.
+    /// typing あ(j) か(f) then が(f+j) must not backspace the committed あ/か).
+    confirmed: bool,
 }
 
 impl TentativeChar {
@@ -115,7 +120,7 @@ impl TentativeChar {
         pending_tail: Vec<String>,
     ) -> Self {
         let mozc_char_len = kana.chars().count();
-        Self { kana, source_keys, rewrite_deadline, pending_tail, mozc_char_len }
+        Self { kana, source_keys, rewrite_deadline, pending_tail, mozc_char_len, confirmed: false }
     }
 }
 
@@ -366,6 +371,15 @@ impl StateMachine {
         self.held_keys.remove(key);
         // Once physically released, the key is free to take part in a new chord.
         self.chord_consumed_keys.remove(key);
+
+        // Releasing a key confirms any speculative char it produced: a later chord
+        // must not rewrite it. (Still-held keys remain unconfirmed so an in-flight
+        // rolling chord can rewrite their speculative output.)
+        for tc in &mut self.tentative_buffer {
+            if tc.source_keys.iter().any(|k| k == key) {
+                tc.confirmed = true;
+            }
+        }
 
         // Modifier key released
         if let Some(idx) = self.modifier_index(key) {
@@ -660,16 +674,18 @@ impl StateMachine {
     fn apply_rule_match(&mut self, rule: RuleMatch, _now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
-        // Find tentative chars to rewrite. Only rewrite entries whose source keys
-        // are ALL part of this rule's key set — otherwise a chord that shares a key
-        // with a previously-confirmed char (e.g. [f,j]→が then [e,j]→で share 'j')
-        // would wrongly consume that earlier char too, deleting extra preedit.
+        // Find tentative chars to rewrite. Only rewrite UNCONFIRMED entries whose
+        // source keys are ALL part of this rule's key set — otherwise a chord that
+        // shares a key with an already-committed char (e.g. [f,j]→が then [e,j]→で
+        // share 'j') would wrongly consume that earlier char too, deleting preedit.
         let rule_keys: BTreeSet<&str> = rule.source_keys.iter().map(String::as_str).collect();
         let affected_count = self
             .tentative_buffer
             .iter()
             .rev()
-            .take_while(|tc| tc.source_keys.iter().all(|k| rule_keys.contains(k.as_str())))
+            .take_while(|tc| {
+                !tc.confirmed && tc.source_keys.iter().all(|k| rule_keys.contains(k.as_str()))
+            })
             .count();
 
         // H1: emit one BackSpace per *Mozc preedit character*, not per TentativeChar —
@@ -920,12 +936,18 @@ impl StateMachine {
     fn fire_mutual_chord(&mut self, chord: crate::config::ChordRule, _now: Instant) -> Vec<OutputAction> {
         let chord_key_set: HashSet<String> = chord.keys.iter().cloned().collect();
 
-        // Rewrite only tentative chars whose source keys are ALL members of this
-        // chord. Matching on "any shared key" would also consume an earlier
-        // confirmed char that happens to share a key (e.g. [f,j]→が then [e,j]→で
-        // share 'j'), deleting extra preedit.
+        // Rewrite only UNCONFIRMED tentative chars whose source keys are all part
+        // of this chord. A char is confirmed once any of its source keys is
+        // released, so this never touches already-committed kana even when its
+        // source key belongs to this chord. (Without the confirmed check, typing
+        // あ(j) か(f) then が(f+j) would see あ's [j] and か's [f] as subsets of
+        // {f,j} and backspace them too.)
         let affected = self.tentative_buffer.iter().rev()
-            .take_while(|tc| tc.source_keys.iter().all(|k| chord_key_set.contains(k)))
+            .take_while(|tc| {
+                !tc.confirmed
+                    && !tc.source_keys.is_empty()
+                    && tc.source_keys.iter().all(|k| chord_key_set.contains(k))
+            })
             .count();
 
         // H1: one BackSpace per Mozc preedit character across the affected entries.
@@ -1158,6 +1180,11 @@ impl StateMachine {
             .iter()
             .map(|tc| tc.kana.as_str())
             .collect()
+    }
+
+    #[cfg(test)]
+    pub fn debug_pending(&self) -> Vec<String> {
+        self.pending_keys.iter().map(|(k, _)| k.clone()).collect()
     }
 
     pub fn is_direct_active(&self) -> bool {
