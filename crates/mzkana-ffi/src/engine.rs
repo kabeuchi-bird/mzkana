@@ -128,6 +128,16 @@ impl Engine {
         };
 
         let actions = self.sm.process(event, now);
+        // Diagnostic: set MZKANA_TRACE=1 to log every key event and the resulting
+        // state-machine actions. Lets us capture the exact on-device event sequence
+        // behind chord misfires without guessing at interleavings.
+        if std::env::var_os("MZKANA_TRACE").is_some() {
+            eprintln!(
+                "[mzkana-trace] key={key:?} {} shift={shift} → actions={actions:?} tentative={:?}",
+                if is_down { "DOWN" } else { "UP" },
+                self.sm.tentative_kana_string(),
+            );
+        }
         self.dispatch_actions(actions, is_down)
     }
 
