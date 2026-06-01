@@ -257,6 +257,18 @@ impl StateMachine {
     fn process_key_down(&mut self, key: &str, shift: bool, now: Instant) -> Vec<OutputAction> {
         // Ctrl/Alt/Super → immediate passthrough (not modelled here; caller should filter)
 
+        // Auto-repeat guard: the OS emits repeated key-down events while a key is
+        // physically held. The state machine models discrete press/release
+        // transitions, so a repeat of an already-held key that drives chord /
+        // speculative emit would corrupt held_keys, pending_keys, and the tentative
+        // buffer (the on-device cause of chord misfires). Only guard keys that take
+        // that path: those tracked in held_keys (regular keys past the modifier /
+        // direct-trigger / control-key branches). Editing/control keys like
+        // BackSpace and arrows are NOT in held_keys, so their repeat still works.
+        if self.held_keys.contains(key) {
+            return Vec::new();
+        }
+
         // Check if key is a modifier definition
         if let Some(idx) = self.modifier_index(key) {
             let kind = self.layout.modifiers[idx].kind;
@@ -281,9 +293,6 @@ impl StateMachine {
             return self.handle_direct_trigger_down(key, now);
         }
 
-        // Track held regular keys for mutual chord detection.
-        self.held_keys.insert(key.to_string());
-
         // Mark modifiers as interrupted (for center-shift interrupt detection)
         for ms in &mut self.modifier_states {
             if ms.held {
@@ -291,9 +300,17 @@ impl StateMachine {
             }
         }
 
-        // Backlspace: pop tentative buffer
+        // Backspace: pop tentative buffer. Handled before held_keys tracking so it
+        // never enters the auto-repeat guard — holding BackSpace must keep deleting.
         if key == "bs" || key == "BackSpace" || key == "backspace" {
             return self.handle_backspace();
+        }
+
+        // Track held regular keys for mutual chord detection. Mozc control/editing
+        // keys (Return, arrows, Henkan, …) are excluded: they don't drive chord or
+        // speculative emit and their auto-repeat must keep working.
+        if !Self::is_mozc_control_key(key) {
+            self.held_keys.insert(key.to_string());
         }
 
         // CONVERSION mode: a non-control key starts fresh composition. Control keys
@@ -370,11 +387,14 @@ impl StateMachine {
                 match modifier_def.tap_action {
                     TapAction::Passthrough => {
                         // A modifier whose tap passes through (e.g. the center-shift
-                        // space in naginata layouts). While a composition is active,
-                        // a tap of a Mozc control key (space → convert) must go to
-                        // Mozc instead of the application; otherwise it would never
-                        // trigger conversion. Idle taps still pass through.
-                        if self.is_composing() && Self::is_mozc_control_key(key) {
+                        // space in naginata layouts). A tap of a Mozc control key is
+                        // always routed to Mozc, regardless of composition state:
+                        //   - composing → space starts conversion, Return commits, etc.
+                        //   - idle      → Mozc still handles it (e.g. space commits a
+                        //     full-width 「　」), which is the expected IME behavior.
+                        // Forwarding the raw key instead would emit a half-width ASCII
+                        // space, never the full-width space a Japanese IME produces.
+                        if Self::is_mozc_control_key(key) {
                             return vec![OutputAction::SendFunctionKey(key.to_string())];
                         }
                         return vec![OutputAction::Passthrough(key.to_string())];
@@ -1116,6 +1136,12 @@ impl StateMachine {
         if self.mozc_mode != MozcMode::Conversion {
             self.tentative_buffer.clear();
             self.pending_keys.clear();
+            // Entering conversion starts a fresh input cycle: drop physical-hold
+            // tracking so a key still held from the pre-conversion chord can't
+            // linger and misfire (and so a subsequent press of that key is not
+            // mistaken for an auto-repeat and swallowed).
+            self.held_keys.clear();
+            self.chord_consumed_keys.clear();
         }
         self.mozc_mode = MozcMode::Conversion;
     }

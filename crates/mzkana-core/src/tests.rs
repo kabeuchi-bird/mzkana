@@ -962,7 +962,9 @@ fn dual_role_hold_emits_shifted_kana() {
 
 #[test]
 fn send_key_is_alias_for_passthrough() {
-    // "send_key" should deserialize identically to "passthrough".
+    // "send_key" should deserialize identically to "passthrough". Use a NON-control
+    // key as the modifier: control keys (space, …) are always routed to Mozc on
+    // tap, which would mask the passthrough behavior under test.
     let toml = r#"
 [meta]
 name = "test"
@@ -970,16 +972,16 @@ mode = "kana"
 schema = 1
 [[modifier]]
 id         = "m"
-key        = "space"
+key        = "muhenkan_placeholder"
 tap_action = "send_key"
 "#;
     let layout = load_layout(toml).unwrap();
     let mut m = StateMachine::new(layout);
     let now = Instant::now();
-    m.process(InputEvent::down("space"), now);
-    let actions = m.process(InputEvent::up("space"), now);
+    m.process(InputEvent::down("muhenkan_placeholder"), now);
+    let actions = m.process(InputEvent::up("muhenkan_placeholder"), now);
     assert!(
-        actions.contains(&OutputAction::Passthrough("space".to_string())),
+        actions.contains(&OutputAction::Passthrough("muhenkan_placeholder".to_string())),
         "send_key tap should produce passthrough: {actions:?}"
     );
 }
@@ -1697,15 +1699,17 @@ fn space_tap_triggers_conversion_while_composing() {
 }
 
 #[test]
-fn space_tap_passes_through_when_idle() {
-    // With no active composition, a space tap is a literal space for the app.
+fn space_tap_sends_to_mozc_when_idle() {
+    // With no active composition, an idle space tap is still routed to Mozc so it
+    // produces a full-width 「　」 (the expected Japanese-IME behavior), rather
+    // than forwarding a raw half-width ASCII space to the application.
     let mut m = sm(NAGINATA);
     let now = Instant::now();
     let _ = m.process(InputEvent::down("space"), now);
     let up = m.process(InputEvent::up("space"), now);
     assert!(
-        up.contains(&OutputAction::Passthrough("space".to_string())),
-        "idle space tap should pass through, got {up:?}"
+        up.contains(&OutputAction::SendFunctionKey("space".to_string())),
+        "idle space tap should be routed to Mozc, got {up:?}"
     );
 }
 
