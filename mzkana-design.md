@@ -1090,9 +1090,8 @@ sensitive_field_behavior = "passthrough"
 
 ## 11.5. 候補ウィンドウ（予測・変換候補の表示）
 
-> 設計検討（未実装、Phase 5 で実装予定）。Mozc が返す候補を fcitx5 の Input Panel に
+> 設計検討（未実装、Phase 4 で実装予定）。Mozc が返す候補を fcitx5 の Input Panel に
 > 表示し、変換動作は可能な限り Mozc に倣う。
-
 ### 背景と現状
 
 `Output.candidate_window`（protobuf tag 6）には予測・変換候補が含まれるが、現状の
