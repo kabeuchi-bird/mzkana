@@ -6,7 +6,11 @@ Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様�
 > 示す概念図と、実装の事実が異なる箇所には「実装メモ／注」を付した。主な実装側の
 > 確定事項: 同期 IPC + ワーカースレッド（非 tokio）、proto の vendor + prost-build、
 > かな送信は AS_IS、セッション初期化は TURN_ON_IME、BS-rewrite は preedit 文字数
-> ベース、オートリピート抑止は core 側、設定 GUI は未実装。
+> ベース、オートリピート抑止は core 側。
+>
+> あわせて未実装の GUI 機能を設計章として追加: §11.5 候補ウィンドウ（予測・変換候補、
+> Mozc 準拠、Phase 4）、§13.5 設定 GUI（fcitx5-configtool 連携で配列ファイル選択、
+> Phase 5）。いずれも「設計検討」であり実装はこれから。
 
 ---
 
@@ -23,8 +27,10 @@ Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様�
 9. [競合検出](#9-競合検出)
 10. [ホットリロード](#10-ホットリロード)
 11. [Preedit 表示戦略](#11-preedit-表示戦略)
+11.5. [候補ウィンドウ（予測・変換候補）](#115-候補ウィンドウ予測変換候補の表示)
 12. [設定パラメータ一覧](#12-設定パラメータ一覧)
 13. [実装構成](#13-実装構成)
+13.5. [設定 GUI（configtool 連携）](#135-設定-guifcitx5-configtool-連携)
 14. [実装フェーズ](#14-実装フェーズ)
 
 ---
@@ -1082,6 +1088,152 @@ sensitive_field_behavior = "passthrough"
 
 ---
 
+## 11.5. 候補ウィンドウ（予測・変換候補の表示）
+
+> 設計検討（未実装、Phase 5 で実装予定）。Mozc が返す候補を fcitx5 の Input Panel に
+> 表示し、変換動作は可能な限り Mozc に倣う。
+
+### 背景と現状
+
+`Output.candidate_window`（protobuf tag 6）には予測・変換候補が含まれるが、現状の
+`decode_response` はこれを読んでおらず、候補は一切表示していない。本章で 2 種類の
+候補表示を設計する。
+
+| 種別 | 契機 | 表示 |
+|---|---|---|
+| 予測候補（suggestion） | かな入力中（合成中）に Mozc が suggestion を返す | preedit の下に区切って一覧 |
+| 変換候補（conversion） | Space 等で変換開始（`focused_index` あり） | Mozc 風の縦型候補ウィンドウ |
+
+両者は Mozc 上は同じ `CandidateWindow` メッセージで表現され、`focused_index` の
+有無で区別される（has_focused_index ⇒ 変換、無 ⇒ suggestion）。
+
+### データフロー
+
+```
+mozc_server
+  │  Output { preedit, candidate_window{ focused_index?, size, candidate[], position }, … }
+  ▼
+mozc/proto.rs : decode_response  … candidate_window をデコードして DecodedOutput に追加
+  ▼
+mozc/mod.rs   : MozcOutput.candidates: Vec<Candidate>, focused_index: Option<u32>
+  ▼
+ffi/engine.rs : ProcessResult に候補を載せる（可変長のため別 FFI 関数で取得）
+  ▼
+fcitx5-addon  : CommonCandidateList を構築し inputPanel().setCandidateList()
+```
+
+### コア側（mozc-core）
+
+`DecodedOutput` / `MozcOutput` に候補フィールドを追加する。
+
+```rust
+pub struct Candidate {
+    pub index: u32,
+    pub value: String,
+    pub id: i32,                 // SELECT/HIGHLIGHT_CANDIDATE 用の Mozc 内部 id
+    pub annotation: Option<String>, // 注釈（[半][カナ] 等、description/suffix）
+}
+
+pub struct MozcOutput {
+    // 既存: preedit, result, is_converting, mode, consumed
+    pub candidates: Vec<Candidate>,
+    pub focused_index: Option<u32>, // Some ⇒ 変換中（縦型窓）、None ⇒ suggestion
+    pub candidate_size: u32,        // 総候補数（ページング用、candidate[] は現ページ分のみ）
+}
+```
+
+`decode_response` で `Output.candidate_window` を読み、`candidate[]`（group, tag 3）の
+`index`(4) / `value`(5) / `id`(9) / `annotation`(7) を取り出す。prost 生成型で
+そのまま辿れる（`output.candidate_window.candidate` 等）。
+
+### FFI 境界
+
+`MzkanaResult` は固定長フラット構造のため可変長の候補リストを載せられない。
+候補は**別関数**で取得する（key_event 後に C++ が呼ぶ）。
+
+```c
+typedef struct { const uint8_t* value; uint32_t value_len;
+                 const uint8_t* annotation; uint32_t annotation_len;
+                 int32_t id; } MzkanaCandidate;
+
+// 直近の Mozc 出力の候補数（focused 時は変換、それ以外は suggestion）
+uint32_t mzkana_engine_candidate_count(const MzkanaEngine* e);
+// i 番目の候補を取得（value/annotation はエンジン所有、次の key_event まで有効）
+MzkanaCandidate mzkana_engine_candidate(const MzkanaEngine* e, uint32_t i);
+// 変換中フォーカス位置（変換中のみ）。未変換/予測時は -1。
+int32_t mzkana_engine_focused_index(const MzkanaEngine* e);
+```
+
+エンジンは直近の `MozcOutput` を保持し、候補文字列のバッファ所有権を握る
+（次キーイベントで上書き）。これにより `MzkanaResult` の ABI 互換を壊さない。
+
+### C++ 側（fcitx5-addon）
+
+`applyResult` の後段で候補を反映する。
+
+```cpp
+void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
+    uint32_t n = mzkana_engine_candidate_count(engine_);
+    if (n == 0) { ic->inputPanel().setCandidateList(nullptr); return; }
+
+    auto list = std::make_unique<fcitx::CommonCandidateList>();
+    list->setPageSize(9);
+    list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical); // Mozc 風縦型
+    for (uint32_t i = 0; i < n; ++i) {
+        auto c = mzkana_engine_candidate(engine_, i);
+        list->append<MzkanaCandidate>(c.id, toStr(c.value), toStr(c.annotation));
+    }
+    int focused = mzkana_engine_focused_index(engine_);
+    if (focused >= 0) list->setGlobalCursorIndex(focused); // 変換時はハイライト
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+}
+```
+
+- **予測候補**: preedit の下に区切って表示したい。fcitx5 には preedit と候補の間の
+  「区切り線」専用 API は無く、classicui がテーマに従って preedit→候補を縦に積む。
+  Mozc 風のヘッダ（「Tab で予測」等）が要るなら `inputPanel().setAuxDown(Text)` に
+  文字列を置く。最小実装では候補リストをそのまま出せば preedit 直下に並ぶ。
+- **変換候補**: `setLayoutHint(Vertical)` + `setGlobalCursorIndex(focused)` で
+  Mozc の縦型・ハイライト付き窓を再現。注釈（`annotation`）は候補の comment として
+  表示できる（`CandidateWord::setComment`）。
+
+### 変換操作のキー経路（Mozc 準拠）
+
+候補選択ロジックは**自前で持たず Mozc に委ねる**。これが Mozc 準拠の最短路。
+
+```
+変換中（candidate list がアクティブ）の keyEvent:
+  Space / Down       → Mozc へ送る（次候補へフォーカス移動）。返ってきた
+                        focused_index で setGlobalCursorIndex 更新
+  Up                 → Mozc へ（前候補）
+  数字 1..9          → その表示位置の候補を SELECT_CANDIDATE（id 指定）で確定
+  Enter              → 現フォーカス候補を確定（SUBMIT / SUBMIT_CANDIDATE）
+  Escape             → REVERT（変換取消、合成に戻る）
+  その他の文字キー   → 現候補を確定し、新規入力として処理（§5 の Conversion 分岐）
+```
+
+数字キーによる直接選択のみ `SessionCommand::SELECT_CANDIDATE`（type 3、候補 id 指定）
+を使う。Space/矢印は通常の SEND_KEY 転送で Mozc 内部のフォーカスが動き、返却された
+`candidate_window.focused_index` に UI を追従させる。これにより候補の並び・ページング・
+確定挙動が Mozc 本体と一致する。
+
+### 設定
+
+```toml
+[settings]
+candidate_page_size  = 9       # 1 ページの候補数（既定 9）
+show_prediction      = true    # 合成中の予測候補を表示するか
+```
+
+> 実装メモ: ページング（`ConvertNextPage`=20 / `ConvertPrevPage`=21）も Mozc へ
+> 転送し、`candidate_window` の再取得で表示更新する。候補注釈の表示有無や
+> ショートカット表記は将来の設定項目候補。
+
+---
+
+
 ## 12. 設定パラメータ一覧
 
 ### `[settings]`
@@ -1204,6 +1356,108 @@ mzkana/
 
 ---
 
+## 13.5. 設定 GUI（fcitx5-configtool 連携）
+
+> 設計検討（未実装、Phase 5 で実装予定）。独立した egui アプリ（旧 §13 の
+> `mzkana-config-gui`）は作らず、**fcitx5-configtool から開く標準の設定画面**として
+> 実装する。配列そのものの GUI 編集は行わない。
+
+### 方針
+
+- fcitx5 addon が `fcitx::Configuration` を公開し、configtool が自動で設定 UI を生成する。
+- 当面の設定項目は **配列ファイルの選択（ドロップダウン）** のみ。他項目は今後追加。
+- 配列ファイルの中身（グリッド・chord 等）の GUI 編集はスコープ外（TOML を直接編集）。
+
+### 配列ファイルのドロップダウン
+
+`~/.config/fcitx5/conf/mzkana/` 配下の `*.toml` を実行時に走査し、ファイル名の
+ドロップダウンとして提示する。fcitx5 に汎用ファイルピッカー注釈は無いため、
+**`EnumAnnotation` のサブクラス**で実行時にファイル一覧を列挙する（fcitx5-rime が
+スキーマ一覧を出すのと同じ idiom）。
+
+```cpp
+// configtool に「実行時に決まる文字列の列挙」を伝える注釈
+struct LayoutFileAnnotation : public fcitx::EnumAnnotation {
+    void dumpDescription(fcitx::RawConfig &config) const {
+        fcitx::EnumAnnotation::dumpDescription(config);   // IsEnum=True
+        int i = 0;
+        for (const auto &name : listLayoutTomlFiles()) {  // mzkana conf ディレクトリを走査
+            config.setValueByPath("Enum/" + std::to_string(i), name);
+            config.setValueByPath("EnumI18n/" + std::to_string(i), name);
+            ++i;
+        }
+    }
+};
+
+FCITX_CONFIGURATION(MzkanaConfig,
+    fcitx::OptionWithAnnotation<std::string, LayoutFileAnnotation>
+        layout{this, "Layout", _("配列ファイル"), "naginata-v17.toml"};
+    // 今後の項目はここに追加（chord_window_ms 等を Option<int> で公開予定）
+);
+```
+
+### エンジン側の配線
+
+```cpp
+class MzkanaFcitxEngine : public fcitx::InputMethodEngineV2 {
+    MzkanaConfig config_;
+    const fcitx::Configuration *getConfig() const override { return &config_; }
+    void setConfig(const fcitx::RawConfig &raw) override {
+        config_.load(raw, true);
+        fcitx::safeSaveAsIni(config_, "conf/mzkana.conf");
+        reloadSelectedLayout();   // 選択された .toml を即座に読み込み直す
+    }
+    void reloadConfig() override {
+        fcitx::readAsIni(config_, "conf/mzkana.conf");
+        reloadSelectedLayout();
+    }
+};
+```
+
+- `reloadSelectedLayout()` は `config_.layout` のファイル名から実パスを解決し、
+  既存の `mzkana_engine_create` / リロード経路で配列を差し替える（§10 と同じく
+  Mozc preedit を revert してから差し替え）。
+- 設定値は `~/.config/fcitx5/conf/mzkana.conf` に永続化される。
+
+### .conf の変更
+
+addon 登録ファイル `fcitx5-addon/data/mzkana.conf` で設定可能にする。
+
+```ini
+[Addon]
+...
+Configurable=True       # ← False から変更。configtool に「設定」ボタンが出る
+```
+
+InputMethod 登録ファイル（`mzkana-im.conf`）側は従来どおり（`Configurable` は
+addon 側で指定）。
+
+### 適用フロー
+
+```
+configtool で配列を選択 → Apply
+  → fcitx5 が engine.setConfig(RawConfig) を呼ぶ
+  → config_ に反映・.conf 保存・reloadSelectedLayout()
+  → 以降の入力は新しい配列で動作（再起動不要）
+```
+
+ファイルを直接編集した場合の自動リロード（§10、notify 監視）と、configtool からの
+選択（setConfig 経由）の 2 経路が共存する。
+
+### 今後の設定項目（候補）
+
+| 項目 | 型 | 備考 |
+|---|---|---|
+| `chord_window_ms` / `mutual_window_ms` | int | §12 の設定を GUI からも変更可能に |
+| `preedit_fallback` | enum | client/panel/buffer/auto |
+| `show_prediction` / `candidate_page_size` | bool/int | §11.5 候補表示 |
+
+> これらは TOML の `[settings]` と二重管理になり得るため、「configtool の値を
+> 既定とし、配列ファイルの `[settings]` で上書き可能」等の優先順位を実装時に決める
+> （現時点では未決）。
+
+---
+
 ## 14. 実装フェーズ
 
 ```
@@ -1230,8 +1484,16 @@ Phase 3: fcitx5 アドオン化  … 完了
   ├ Preedit 表示分岐（インライン / パネル / buffer）+ sensitive 欄処理
   └ ホットリロード（notify、engine.rs 内）
 
-Phase 4: 設定 GUI  … 未着手
-  └ 配列の視覚編集 + プレビュー（クレート未作成）
+Phase 4: 候補ウィンドウ（§11.5）  … 未着手
+  ├ decode_response で candidate_window をデコード（MozcOutput に候補追加）
+  ├ FFI: mzkana_engine_candidate_count / _candidate / _focused_index
+  ├ C++: CommonCandidateList で予測（preedit 下）・変換（縦型）を描画
+  └ 変換操作キー（Space/矢印/数字/Enter/Esc）を Mozc へ転送し focused_index に追従
+
+Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
+  ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン
+  ├ addon .conf を Configurable=True に、getConfig/setConfig/reloadConfig 実装
+  └ 選択即時反映（setConfig → reloadSelectedLayout）。他設定項目は順次追加
 ```
 
 ### 各フェーズの状況
@@ -1241,7 +1503,8 @@ Phase 4: 設定 GUI  … 未着手
 | 1 | 4 種類の既存配列が cli で正しいかな列を出力する | ✅ 完了 |
 | 2 | cli から実際の Mozc サーバに接続して preedit/result が得られる | ✅ 完了 |
 | 3 | fcitx5 上で実用入力ができ、設定リロードが動く | ✅ 完了（実機動作確認済み） |
-| 4 | GUI で配列の編集・保存・即時プレビューができる | 未着手 |
+| 4 | 予測・変換候補が Mozc 準拠で表示され、変換操作ができる | 未着手 |
+| 5 | configtool から配列ファイルを選択・即時反映できる | 未着手 |
 
 ---
 
