@@ -3,13 +3,16 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use mzkana_core::{
-    load_layout, InputEvent, MozcClient, MozcOutput, OutputAction, StateMachine,
+    load_layout, InputEvent, MozcOutput, MozcWorker, Op, OnFocusChange,
+    OutputAction, PreeditFallback, SensitiveFieldBehavior, StateMachine, WorkerError,
 };
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 pub struct Engine {
     sm: StateMachine,
-    mozc: Option<MozcClient>,
+    /// Mozc IPC runs on a worker thread with a hard timeout so a slow/hung
+    /// `mozc_server` can never freeze the UI (C5).
+    mozc: Option<MozcWorker>,
     /// Explicit socket path passed at construction time; None = auto-discover.
     mozc_socket: Option<PathBuf>,
     /// When Some, don't attempt to reconnect until this instant.
@@ -27,7 +30,7 @@ impl Engine {
         let layout = load_layout(&src).map_err(|e| format!("config error: {e}"))?;
         let sm = StateMachine::new(layout);
 
-        let mozc = match MozcClient::connect(socket_path) {
+        let mozc = match MozcWorker::connect(socket_path) {
             Ok(c) => {
                 eprintln!("[mzkana] Mozc connected (session {})", c.session_id());
                 Some(c)
@@ -90,8 +93,12 @@ impl Engine {
 
         match reloaded {
             Some(layout) => {
+                // H4: clear the in-flight composition before swapping configs.
+                // Replacing the StateMachine drops its tentative buffer, so without
+                // reverting first the speculative kana already sent to Mozc would be
+                // orphaned in the Mozc preedit.
+                self.reset();
                 self.sm = StateMachine::new(layout);
-                self.preedit.clear();
                 tracing::info!("config reloaded from {}", self.config_path.display());
                 true
             }
@@ -115,6 +122,16 @@ impl Engine {
         };
 
         let actions = self.sm.process(event, now);
+        // Diagnostic: set MZKANA_TRACE=1 to log every key event and the resulting
+        // state-machine actions. Lets us capture the exact on-device event sequence
+        // behind chord misfires without guessing at interleavings.
+        if std::env::var_os("MZKANA_TRACE").is_some() {
+            eprintln!(
+                "[mzkana-trace] key={key:?} {} shift={shift} → actions={actions:?} tentative={:?}",
+                if is_down { "DOWN" } else { "UP" },
+                self.sm.tentative_kana_string(),
+            );
+        }
         self.dispatch_actions(actions, is_down)
     }
 
@@ -142,7 +159,7 @@ impl Engine {
                 return false;
             }
         }
-        match MozcClient::connect_quick(self.mozc_socket.as_deref()) {
+        match MozcWorker::connect_quick(self.mozc_socket.as_deref()) {
             Ok(c) => {
                 eprintln!("[mzkana] Mozc reconnected (session {})", c.session_id());
                 self.mozc = Some(c);
@@ -160,9 +177,70 @@ impl Engine {
     pub fn reset(&mut self) {
         self.sm.reset();
         if let Some(ref mut mozc) = self.mozc {
-            let _ = mozc.revert();
+            // Revert the Mozc preedit; if the worker has gone dead, discard it so
+            // the next event reconnects.
+            if mozc.batch(vec![Op::Revert]).is_err() {
+                self.mozc = None;
+            }
         }
         self.preedit.clear();
+    }
+
+    /// Handle focus loss (IM deactivation), honoring the `on_focus_change` setting (H3).
+    pub fn focus_out(&mut self) {
+        match self.sm.settings().on_focus_change {
+            // Keep the in-progress composition so it resumes when focus returns.
+            OnFocusChange::Preserve => {}
+            // Discard the in-progress composition (revert + clear preedit).
+            OnFocusChange::Reset => self.reset(),
+        }
+    }
+
+    /// `sensitive_field_behavior` setting as an int for the FFI/C++ layer
+    /// (0 = passthrough, 1 = buffer).
+    pub fn sensitive_field_behavior(&self) -> i32 {
+        match self.sm.settings().sensitive_field_behavior {
+            SensitiveFieldBehavior::Passthrough => 0,
+            SensitiveFieldBehavior::Buffer => 1,
+        }
+    }
+
+    /// `preedit_fallback` setting as an int for the FFI/C++ layer
+    /// (0 = client, 1 = panel, 2 = buffer, 3 = auto).
+    pub fn preedit_fallback(&self) -> i32 {
+        match self.sm.settings().preedit_fallback {
+            PreeditFallback::Client => 0,
+            PreeditFallback::Panel => 1,
+            PreeditFallback::Buffer => 2,
+            PreeditFallback::Auto => 3,
+        }
+    }
+
+    /// Translate an `OutputAction` into the Mozc op it issues, if any.
+    fn action_op(action: &OutputAction) -> Option<Op> {
+        match action {
+            OutputAction::SendKana(s) => Some(Op::SendKana(s.clone())),
+            OutputAction::Backspace => Some(Op::Backspace),
+            OutputAction::MozcSubmit => Some(Op::Submit),
+            OutputAction::SendFunctionKey(name) => Some(Op::SendFunctionKey(name.clone())),
+            OutputAction::SendModifiedKey { key, mods } => {
+                Some(Op::SendModified { key: key.clone(), mods: *mods })
+            }
+            OutputAction::SubmitAndCommit(_) | OutputAction::SubmitThenPassthrough(_) => Some(Op::Submit),
+            OutputAction::Passthrough(_) | OutputAction::CommitDirect(_) => None,
+        }
+    }
+
+    /// The natural key to forward to the application when Mozc is unavailable or
+    /// did not consume the event.
+    fn fallback_passthrough(action: &OutputAction) -> Option<String> {
+        match action {
+            OutputAction::Backspace => Some("BackSpace".to_string()),
+            OutputAction::MozcSubmit => Some("Return".to_string()),
+            OutputAction::SendFunctionKey(name) => Some(name.clone()),
+            OutputAction::SubmitThenPassthrough(k) => Some(k.clone()),
+            _ => None,
+        }
     }
 
     fn dispatch_actions(&mut self, actions: Vec<OutputAction>, is_key_down: bool) -> ProcessResult {
@@ -175,6 +253,43 @@ impl Engine {
                 forward_key: None,
                 forward_mods: 0,
             };
+        }
+
+        // Collect every Mozc op this keystroke issues and run them as ONE batch on
+        // the worker thread (a single channel round-trip and one 150 ms timeout
+        // budget, instead of one per op — important for chord rewrites that emit
+        // BackSpace×N + SendKana).
+        let ops: Vec<Op> = actions.iter().filter_map(Self::action_op).collect();
+        let mut outputs: std::collections::VecDeque<MozcOutput> = std::collections::VecDeque::new();
+        let mut mozc_alive = false;
+
+        if !ops.is_empty() {
+            if let Some(ref mut mozc) = self.mozc {
+                match mozc.batch(ops) {
+                    Ok(results) => {
+                        mozc_alive = true;
+                        for r in results {
+                            match r {
+                                Ok(out) => outputs.push_back(out),
+                                Err(_) => {
+                                    // A per-op I/O failure means the connection is
+                                    // broken; drop it so the next event reconnects.
+                                    self.mozc = None;
+                                    mozc_alive = false;
+                                    outputs.clear();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(WorkerError::Dead) => {
+                        // Timed out or thread gone: discard the worker (its Drop
+                        // detaches the possibly-hung thread) and proceed without it
+                        // so the UI never blocks.  Reconnect happens next event.
+                        self.mozc = None;
+                    }
+                }
+            }
         }
 
         let mut commit: Option<String> = None;
@@ -193,83 +308,67 @@ impl Engine {
                     any_consumed = true;
                 }
                 OutputAction::SubmitAndCommit(s) => {
-                    if let Some(ref mut mozc) = self.mozc {
-                        if let Ok(out) = mozc.submit() {
-                            self.apply_mozc_output(out, &mut commit);
-                        }
+                    if let Some(out) = outputs.pop_front() {
+                        self.apply_mozc_output(out, &mut commit);
                     }
-                    // Append the direct commit after any Mozc commit
-                    let direct = s.clone();
+                    // Append the direct commit after any Mozc commit.
                     match commit {
-                        Some(ref mut c) => c.push_str(&direct),
-                        None => commit = Some(direct),
+                        Some(ref mut c) => c.push_str(s),
+                        None => commit = Some(s.clone()),
                     }
                     any_consumed = true;
                 }
+                OutputAction::SubmitThenPassthrough(k) => {
+                    // Commit the current preedit (if Mozc answered), then let the raw
+                    // key fall through to the application.
+                    if let Some(out) = outputs.pop_front() {
+                        self.apply_mozc_output(out, &mut commit);
+                    }
+                    passthrough_key = Some(k.clone());
+                }
                 OutputAction::SendModifiedKey { key, mods } => {
-                    let send_result = self.mozc.as_mut()
-                        .map(|mozc| mozc.send_modified_key(key, *mods));
-
-                    let mozc_consumed = match send_result {
-                        Some(Ok(out)) => {
+                    let mozc_consumed = match outputs.pop_front() {
+                        Some(out) => {
                             let consumed = out.consumed;
                             self.apply_mozc_output(out, &mut commit);
                             consumed
                         }
-                        Some(Err(_)) => {
-                            // I/O failure — mark dead so try_reconnect_mozc fires next event.
-                            self.mozc = None;
-                            false
-                        }
                         None => false,
                     };
-
                     if !mozc_consumed {
                         forward_key = Some(key.clone());
                         forward_mods = *mods;
                     }
                     any_consumed = true;
                 }
+                // SendKana / Backspace / MozcSubmit / SendFunctionKey
                 _ => {
-                    match self.dispatch_to_mozc(action) {
-                        Some(out) => {
-                            let mozc_consumed = out.consumed;
-                            self.apply_mozc_output(out, &mut commit);
-                            if mozc_consumed {
-                                any_consumed = true;
-                            } else {
-                                // Mozc returned but didn't consume (e.g. BackSpace on
-                                // empty preedit) — passthrough the natural key so the
-                                // application can handle it (e.g. delete text, undo).
-                                let pt = match action {
-                                    OutputAction::Backspace => Some("BackSpace"),
-                                    OutputAction::MozcSubmit => Some("Return"),
-                                    OutputAction::SendFunctionKey(name) => Some(name.as_str()),
-                                    _ => { any_consumed = true; None }
-                                };
-                                if let Some(key) = pt {
-                                    passthrough_key = Some(key.to_string());
-                                }
-                            }
-                        }
-                        None if self.mozc.is_some() => {
-                            // I/O failure — mark dead so try_reconnect_mozc fires next event.
-                            self.mozc = None;
+                    if let Some(out) = outputs.pop_front() {
+                        let mozc_consumed = out.consumed;
+                        self.apply_mozc_output(out, &mut commit);
+                        if mozc_consumed {
+                            any_consumed = true;
+                        } else if let Some(pt) = Self::fallback_passthrough(action) {
+                            // Mozc returned but didn't consume (e.g. BackSpace on an
+                            // empty preedit) — pass the natural key to the application.
+                            passthrough_key = Some(pt);
+                        } else {
                             any_consumed = true;
                         }
-                        None => {
-                            // Mozc absent: passthrough the natural key.
-                            let pt = match action {
-                                OutputAction::Backspace => Some("BackSpace"),
-                                OutputAction::MozcSubmit => Some("Return"),
-                                OutputAction::SendFunctionKey(name) => Some(name.as_str()),
-                                _ => None,
-                            };
-                            if let Some(key) = pt {
-                                tracing::warn!("Mozc absent; passing through as key: {key}");
-                                passthrough_key = Some(key.to_string());
-                            }
+                    } else if mozc_alive {
+                        // No output for an op that should have produced one: treat as
+                        // consumed (the op ran) without further action.
+                        any_consumed = true;
+                    } else if let OutputAction::SendKana(s) = action {
+                        // Mozc absent: commit kana directly so raw kana still works.
+                        match commit {
+                            Some(ref mut c) => c.push_str(s),
+                            None => commit = Some(s.clone()),
                         }
+                        any_consumed = true;
+                    } else if let Some(pt) = Self::fallback_passthrough(action) {
+                        tracing::warn!("Mozc absent; passing through as key: {pt}");
+                        passthrough_key = Some(pt);
                     }
                 }
             }
@@ -277,29 +376,6 @@ impl Engine {
 
         let consumed = any_consumed || passthrough_key.is_none();
         ProcessResult { consumed, preedit: self.preedit.clone(), commit, passthrough_key, forward_key, forward_mods }
-    }
-
-    fn dispatch_to_mozc(&mut self, action: &OutputAction) -> Option<MozcOutput> {
-        if let Some(ref mut mozc) = self.mozc {
-            return match action {
-                OutputAction::SendKana(s) => mozc.send_kana(s).ok(),
-                OutputAction::Backspace => mozc.send_backspace().ok(),
-                OutputAction::MozcSubmit => mozc.submit().ok(),
-                OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).ok(),
-                _ => None,
-            };
-        }
-        // Mozc not connected: commit kana directly so raw kana input still works.
-        if let OutputAction::SendKana(s) = action {
-            return Some(MozcOutput {
-                preedit: String::new(),
-                result: Some(s.clone()),
-                is_converting: false,
-                mode: 0,
-                consumed: true,
-            });
-        }
-        None
     }
 
     fn apply_mozc_output(&mut self, out: MozcOutput, commit: &mut Option<String>) {

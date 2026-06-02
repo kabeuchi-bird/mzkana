@@ -4,6 +4,9 @@
 #include <fcitx/addonfactory.h>
 #include <fcitx/inputmethodengine.h>
 #include <fcitx/instance.h>
+#include <fcitx/inputcontext.h>
+#include <fcitx-utils/event.h>
+#include <fcitx-utils/trackableobject.h>
 
 #include <memory>
 #include <string>
@@ -42,10 +45,19 @@ private:
     MzkanaEngine *engine_ = nullptr;
     bool mozcAvailable_ = false;
 
+    // C2: ~10 ms periodic timer that drives mzkana_engine_tick while a preedit is
+    // active (chord-confirm deadline, deferred compound-output tail). Stopped when
+    // the preedit is empty to avoid a constant 100 Hz wakeup.
+    std::unique_ptr<fcitx::EventSourceTime> tickTimer_;
+    fcitx::TrackableObjectReference<fcitx::InputContext> tickIc_;
+    std::string lastPreedit_;
+
     std::string defaultConfigPath() const;
     void tryInitEngine();
     void applyResult(fcitx::InputContext *ic, const MzkanaResult &result);
     void clearPreedit(fcitx::InputContext *ic);
+    void updateTickTimer(bool active, fcitx::InputContext *ic);
+    void onTick();
 };
 
 class MzkanaEngineFactory : public fcitx::AddonFactory {

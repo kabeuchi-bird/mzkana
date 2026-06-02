@@ -642,5 +642,92 @@ impl Layout {
 
 pub fn load_layout(toml_str: &str) -> Result<Layout> {
     let file: LayoutFile = toml::from_str(toml_str).map_err(|e| ConfigError::Toml(e.to_string()))?;
-    Layout::from_file(&file)
+    let layout = Layout::from_file(&file)?;
+    // Surface soft (non-fatal) conflicts via the log; `validate` shows them too.
+    for c in analyze_conflicts(&layout) {
+        tracing::warn!("layout conflict: {}", c.message);
+    }
+    Ok(layout)
+}
+
+/// A non-fatal layout conflict surfaced by [`analyze_conflicts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub message: String,
+}
+
+/// Analyze a built layout for non-fatal conflicts: multi-role trigger keys,
+/// base-layer mappings shadowed by a special role, duplicate chords, and chord
+/// members swallowed by a modifier (H5).
+///
+/// Hard conflicts (e.g. contradictory `direct` rules) are rejected earlier by
+/// `Layout::from_file`; this surfaces the softer issues for `validate` and logging.
+pub fn analyze_conflicts(layout: &Layout) -> Vec<Conflict> {
+    use std::collections::BTreeMap;
+    let mut out = Vec::new();
+    let mut warn = |m: String| out.push(Conflict { message: m });
+
+    // Collect the special (non-base) role(s) each key plays.
+    let mut roles: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for m in &layout.modifiers {
+        roles.entry(m.key.as_str()).or_default().push(format!("modifier '{}'", m.id));
+    }
+    if let Some(dt) = &layout.direct_trigger {
+        for k in &dt.keys {
+            roles.entry(k.as_str()).or_default().push("direct trigger".into());
+        }
+    }
+    for (t, _) in &layout.prefix_layers {
+        roles.entry(t.as_str()).or_default().push("prefix trigger".into());
+    }
+    for (t, _) in &layout.postfix_layers {
+        roles.entry(t.as_str()).or_default().push("postfix trigger".into());
+    }
+
+    for (key, key_roles) in &roles {
+        if key_roles.len() > 1 {
+            warn(format!(
+                "key '{key}' plays multiple roles ({}); behavior is ambiguous",
+                key_roles.join(", ")
+            ));
+        }
+        if let Some(kana) = layout.base_layer.get(*key) {
+            warn(format!(
+                "key '{key}' is a {} but also maps to base kana '{kana}'; the special role takes precedence",
+                key_roles[0]
+            ));
+        }
+    }
+
+    // Duplicate chords with the same (order-insensitive) key set.
+    let mut seen: BTreeMap<Vec<String>, String> = BTreeMap::new();
+    for c in &layout.chords {
+        let mut set = c.keys.clone();
+        set.sort();
+        if let Some(prev) = seen.insert(set, c.output.clone()) {
+            if prev != c.output {
+                warn(format!(
+                    "chord {:?} is defined more than once with different outputs ('{prev}' vs '{}')",
+                    c.keys, c.output
+                ));
+            }
+        }
+    }
+
+    // Chord members that are also modifier keys: the modifier intercepts the press
+    // before the chord can form.
+    let mod_keys: std::collections::HashSet<&str> =
+        layout.modifiers.iter().map(|m| m.key.as_str()).collect();
+    for c in &layout.chords {
+        for k in &c.keys {
+            if mod_keys.contains(k.as_str()) {
+                warn(format!(
+                    "chord {:?} includes modifier key '{k}'; the modifier intercepts it and the chord may never fire",
+                    c.keys
+                ));
+            }
+        }
+    }
+
+    out
 }

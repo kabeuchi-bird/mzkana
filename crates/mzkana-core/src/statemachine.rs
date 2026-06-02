@@ -57,6 +57,9 @@ pub enum OutputAction {
     SubmitAndCommit(String),
     /// Pass the key through to the application unchanged
     Passthrough(String),
+    /// Submit current Mozc preedit, then pass the key through to the application.
+    /// Used for unassigned keys during active composition (C4).
+    SubmitThenPassthrough(String),
     /// Notify Mozc that conversion is complete (e.g. Enter)
     MozcSubmit,
     /// Send a function/control key (e.g. Return, Tab, Up) bypassing Mozc preedit.
@@ -75,6 +78,15 @@ pub const MOD_CTRL:  u8 = 0x02;
 pub const MOD_ALT:   u8 = 0x04;
 pub const MOD_SUPER: u8 = 0x08;
 
+/// Mozc control/editing keys (C4).
+/// Keys in this set are sent to Mozc during composition for conversion/navigation.
+/// Keys NOT in this set, when pressed during composition, trigger SubmitThenPassthrough.
+const MOZC_CONTROL_KEYS: &[&str] = &[
+    "space", "Return", "Tab", "Left", "Right", "Up", "Down",
+    "Home", "End", "Prior", "Next", "Delete", "Escape",
+    "Henkan", "Muhenkan", "Hiragana_Katakana",
+];
+
 // ── Internal state ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -87,6 +99,29 @@ struct TentativeChar {
     /// (chord deadline expired or no chord candidates). Used for sequences like
     /// `"、 !Enter"` whose leading kana is sent speculatively.
     pending_tail: Vec<String>,
+    /// Number of characters this kana occupies in the Mozc preedit. A single
+    /// keystroke can emit a multi-character kana ("きゃ", an alias expansion, a
+    /// composed kana), which `SendKana` inserts as that many preedit characters.
+    /// Rewrites/backspaces must remove exactly this many to keep the local buffer
+    /// and the Mozc preedit in lock-step (H1).
+    mozc_char_len: usize,
+    /// True once one of this char's source keys has been physically released. A
+    /// confirmed char is "locked in" and must never be rewritten by a later chord,
+    /// even if its source keys happen to be a subset of that chord's keys (e.g.
+    /// typing あ(j) か(f) then が(f+j) must not backspace the committed あ/か).
+    confirmed: bool,
+}
+
+impl TentativeChar {
+    fn new(
+        kana: String,
+        source_keys: Vec<String>,
+        rewrite_deadline: Option<Instant>,
+        pending_tail: Vec<String>,
+    ) -> Self {
+        let mozc_char_len = kana.chars().count();
+        Self { kana, source_keys, rewrite_deadline, pending_tail, mozc_char_len, confirmed: false }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +166,11 @@ pub struct StateMachine {
     chord_deadline: Option<Instant>,
     /// Physically held regular (non-modifier, non-trigger) keys, for mutual chord detection.
     held_keys: HashSet<String>,
+    /// Keys already consumed by a fired mutual chord but not yet physically
+    /// released. They stay in `held_keys` during fast rolling input, but must not
+    /// participate in another mutual chord until released (prevents a lingering
+    /// key from re-firing its old chord). Cleared per key on key-up.
+    chord_consumed_keys: HashSet<String>,
 }
 
 impl StateMachine {
@@ -158,6 +198,7 @@ impl StateMachine {
             mozc_mode: MozcMode::Composition,
             chord_deadline: None,
             held_keys: HashSet::new(),
+            chord_consumed_keys: HashSet::new(),
         }
     }
 
@@ -176,6 +217,7 @@ impl StateMachine {
         self.direct_trigger_state = DirectTriggerState::Inactive;
         self.direct_trigger_interrupted = false;
         self.held_keys.clear();
+        self.chord_consumed_keys.clear();
         actions
     }
 
@@ -197,6 +239,9 @@ impl StateMachine {
                 self.update_chord_deadline();
             }
         }
+        // C1: also expire stale pending keys on tick so a chord cannot form with a
+        // key whose window has elapsed, even if no new key has arrived since.
+        self.prune_expired_pending(now);
         actions
     }
 
@@ -216,6 +261,18 @@ impl StateMachine {
 
     fn process_key_down(&mut self, key: &str, shift: bool, now: Instant) -> Vec<OutputAction> {
         // Ctrl/Alt/Super → immediate passthrough (not modelled here; caller should filter)
+
+        // Auto-repeat guard: the OS emits repeated key-down events while a key is
+        // physically held. The state machine models discrete press/release
+        // transitions, so a repeat of an already-held key that drives chord /
+        // speculative emit would corrupt held_keys, pending_keys, and the tentative
+        // buffer (the on-device cause of chord misfires). Only guard keys that take
+        // that path: those tracked in held_keys (regular keys past the modifier /
+        // direct-trigger / control-key branches). Editing/control keys like
+        // BackSpace and arrows are NOT in held_keys, so their repeat still works.
+        if self.held_keys.contains(key) {
+            return Vec::new();
+        }
 
         // Check if key is a modifier definition
         if let Some(idx) = self.modifier_index(key) {
@@ -241,9 +298,6 @@ impl StateMachine {
             return self.handle_direct_trigger_down(key, now);
         }
 
-        // Track held regular keys for mutual chord detection.
-        self.held_keys.insert(key.to_string());
-
         // Mark modifiers as interrupted (for center-shift interrupt detection)
         for ms in &mut self.modifier_states {
             if ms.held {
@@ -251,13 +305,24 @@ impl StateMachine {
             }
         }
 
-        // Backlspace: pop tentative buffer
+        // Backspace: pop tentative buffer. Handled before held_keys tracking so it
+        // never enters the auto-repeat guard — holding BackSpace must keep deleting.
         if key == "bs" || key == "BackSpace" || key == "backspace" {
             return self.handle_backspace();
         }
 
-        // CONVERSION mode: new key starts fresh composition
-        if self.mozc_mode == MozcMode::Conversion {
+        // Track held regular keys for mutual chord detection. Mozc control/editing
+        // keys (Return, arrows, Henkan, …) are excluded: they don't drive chord or
+        // speculative emit and their auto-repeat must keep working.
+        if !Self::is_mozc_control_key(key) {
+            self.held_keys.insert(key.to_string());
+        }
+
+        // CONVERSION mode: a non-control key starts fresh composition. Control keys
+        // (Henkan / space / arrows / Return / Escape …) continue the active
+        // conversion — they must reach Mozc to cycle candidates, move segments, or
+        // commit — so leave the mode and buffers intact for them.
+        if self.mozc_mode == MozcMode::Conversion && !Self::is_mozc_control_key(key) {
             self.tentative_buffer.clear();
             self.pending_keys.clear();
             self.mozc_mode = MozcMode::Composition;
@@ -280,12 +345,12 @@ impl StateMachine {
                 return vec![OutputAction::Passthrough(key.to_string())];
             }
             let actions = vec![OutputAction::SendKana(mod_output.clone())];
-            self.tentative_buffer.push(TentativeChar {
-                kana: mod_output,
-                source_keys: vec![key.to_string()],
-                rewrite_deadline: None,
-                pending_tail: Vec::new(),
-            });
+            self.tentative_buffer.push(TentativeChar::new(
+                mod_output,
+                vec![key.to_string()],
+                None,
+                Vec::new(),
+            ));
             return actions;
         }
 
@@ -304,6 +369,17 @@ impl StateMachine {
 
     fn process_key_up(&mut self, key: &str, now: Instant) -> Vec<OutputAction> {
         self.held_keys.remove(key);
+        // Once physically released, the key is free to take part in a new chord.
+        self.chord_consumed_keys.remove(key);
+
+        // Releasing a key confirms any speculative char it produced: a later chord
+        // must not rewrite it. (Still-held keys remain unconfirmed so an in-flight
+        // rolling chord can rewrite their speculative output.)
+        for tc in &mut self.tentative_buffer {
+            if tc.source_keys.iter().any(|k| k == key) {
+                tc.confirmed = true;
+            }
+        }
 
         // Modifier key released
         if let Some(idx) = self.modifier_index(key) {
@@ -324,6 +400,17 @@ impl StateMachine {
             if !was_interrupted && !had_oneshot {
                 match modifier_def.tap_action {
                     TapAction::Passthrough => {
+                        // A modifier whose tap passes through (e.g. the center-shift
+                        // space in naginata layouts). A tap of a Mozc control key is
+                        // always routed to Mozc, regardless of composition state:
+                        //   - composing → space starts conversion, Return commits, etc.
+                        //   - idle      → Mozc still handles it (e.g. space commits a
+                        //     full-width 「　」), which is the expected IME behavior.
+                        // Forwarding the raw key instead would emit a half-width ASCII
+                        // space, never the full-width space a Japanese IME produces.
+                        if Self::is_mozc_control_key(key) {
+                            return vec![OutputAction::SendFunctionKey(key.to_string())];
+                        }
                         return vec![OutputAction::Passthrough(key.to_string())];
                     }
                     TapAction::BaseKana => {
@@ -368,6 +455,12 @@ impl StateMachine {
     fn speculative_emit(&mut self, key: &str, _shift: bool, now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
+        // C1: enforce the chord window by time. Drop pending keys that are older
+        // than their chord window relative to `now` so a key pressed long after a
+        // previous one (well past chord_window_ms) cannot spuriously form a chord
+        // with it. The just-pushed key (ts == now) is always retained.
+        self.prune_expired_pending(now);
+
         // Resolve what chord / prefix / postfix candidates exist.
         // Timed chords (symmetric=false) use a deadline window.
         // Mutual chords (symmetric=true) fire via held_keys, so they use no deadline here
@@ -396,8 +489,27 @@ impl StateMachine {
             // need the key here.
             if !has_timed_chord && !has_mutual_chord {
                 self.pending_keys.pop();
-                // Key has no mapping and cannot start a chord — pass through to application.
-                return vec![OutputAction::Passthrough(key.to_string())];
+
+                // C4: Key routing for unassigned keys during composition.
+                if self.is_composing() {
+                    // During active composition, route the key based on type:
+                    // - Control keys (space, Return, etc.) → SendFunctionKey (send to Mozc)
+                    // - Other keys → SubmitThenPassthrough (confirm preedit, then pass to app)
+                    if Self::is_mozc_control_key(key) {
+                        return vec![OutputAction::SendFunctionKey(key.to_string())];
+                    } else {
+                        // Submitting commits and clears the Mozc preedit, so drop the local
+                        // tentative state too to keep the 1:1 invariant (tentative_buffer
+                        // mirrors Mozc preedit) intact.
+                        self.tentative_buffer.clear();
+                        self.pending_keys.clear();
+                        self.mozc_mode = MozcMode::Composition;
+                        return vec![OutputAction::SubmitThenPassthrough(key.to_string())];
+                    }
+                } else {
+                    // Not composing: pass through to application
+                    return vec![OutputAction::Passthrough(key.to_string())];
+                }
             }
             return actions;
         };
@@ -464,21 +576,21 @@ impl StateMachine {
             for t in &pending_tail {
                 actions.push(Self::make_output_action(t));
             }
-            self.tentative_buffer.push(TentativeChar {
+            self.tentative_buffer.push(TentativeChar::new(
                 kana,
-                source_keys: vec![key.to_string()],
-                rewrite_deadline: None,
-                pending_tail: Vec::new(),
-            });
+                vec![key.to_string()],
+                None,
+                Vec::new(),
+            ));
             return actions;
         };
 
-        self.tentative_buffer.push(TentativeChar {
+        self.tentative_buffer.push(TentativeChar::new(
             kana,
-            source_keys: vec![key.to_string()],
+            vec![key.to_string()],
             rewrite_deadline,
             pending_tail,
-        });
+        ));
 
         actions
     }
@@ -562,19 +674,21 @@ impl StateMachine {
     fn apply_rule_match(&mut self, rule: RuleMatch, _now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
-        // Find tentative chars to rewrite
+        // Find tentative chars to rewrite. Only rewrite UNCONFIRMED entries whose
+        // source keys are ALL part of this rule's key set — otherwise a chord that
+        // shares a key with an already-committed char (e.g. [f,j]→が then [e,j]→で
+        // share 'j') would wrongly consume that earlier char too, deleting preedit.
+        let rule_keys: BTreeSet<&str> = rule.source_keys.iter().map(String::as_str).collect();
         let affected_count = self
             .tentative_buffer
             .iter()
             .rev()
-            .take_while(|tc| tc.source_keys.iter().any(|k| rule.source_keys.contains(k)))
+            .take_while(|tc| {
+                !tc.confirmed && tc.source_keys.iter().all(|k| rule_keys.contains(k.as_str()))
+            })
             .count();
 
-        for _ in 0..affected_count {
-            actions.push(OutputAction::Backspace);
-        }
-        self.tentative_buffer
-            .truncate(self.tentative_buffer.len() - affected_count);
+        actions.extend(self.pop_tentative(affected_count));
 
         // Resolve the output string to owned tokens, then emit
         let tokens: Vec<String> = self
@@ -723,9 +837,11 @@ impl StateMachine {
 
     fn handle_backspace(&mut self) -> Vec<OutputAction> {
         if !self.tentative_buffer.is_empty() {
-            self.tentative_buffer.pop();
+            // Remove the last tentative unit (H1: a unit may be a multi-character
+            // kana, so emit a BackSpace per preedit character).
+            let actions = self.pop_tentative(1);
             self.pending_keys.clear();
-            vec![OutputAction::Backspace]
+            actions
         } else if !self.pending_keys.is_empty() {
             // Partial prefix/direct sequence in progress — discard silently
             self.pending_keys.clear();
@@ -775,17 +891,34 @@ impl StateMachine {
         self.layout.modifiers.iter().position(|m| m.key == key)
     }
 
-    /// Return the first mutual chord (symmetric=true) whose key set is a subset of
-    /// `held_keys` and that includes `new_key`. Called before the new key enters pending_keys.
+    /// Return the mutual chord (symmetric=true) that `new_key` completes.
+    /// Called before the new key enters `pending_keys`.
+    ///
+    /// Two-pass matching disambiguates a held key that lingers after its chord
+    /// fired (fast rolling input where the release arrives late) from a held key
+    /// intentionally used as a rolling shift:
+    ///   1. Prefer a chord whose partner keys are all FRESH (not already consumed
+    ///      by a prior chord). This lets (e,j)→で win over a stale (f,j) when 'f'
+    ///      is merely lingering unreleased.
+    ///   2. Only if no fresh chord matches, allow a consumed partner — this is the
+    ///      genuine rolling case where the shared key is held across chords
+    ///      (e.g. hold 'j', tap 'f' then 'e' → が, で).
+    ///
+    /// In both passes every chord key must be physically held.
     fn find_mutual_chord_match(&self, new_key: &str) -> Option<crate::config::ChordRule> {
-        for chord in &self.layout.chords {
-            if !chord.symmetric { continue; }
-            if !chord.keys.iter().any(|k| k == new_key) { continue; }
-            if chord.keys.iter().all(|k| self.held_keys.contains(k)) {
-                return Some(chord.clone());
-            }
-        }
-        None
+        let matches = |require_fresh_partners: bool| {
+            self.layout.chords.iter().find(|chord| {
+                chord.symmetric
+                    && chord.keys.iter().any(|k| k == new_key)
+                    && chord.keys.iter().all(|k| self.held_keys.contains(k))
+                    && (!require_fresh_partners
+                        || chord
+                            .keys
+                            .iter()
+                            .all(|k| k == new_key || !self.chord_consumed_keys.contains(k)))
+            })
+        };
+        matches(true).or_else(|| matches(false)).cloned()
     }
 
     /// Fire a mutual chord: rewrite any speculative emissions from pending chord keys,
@@ -793,20 +926,28 @@ impl StateMachine {
     fn fire_mutual_chord(&mut self, chord: crate::config::ChordRule, _now: Instant) -> Vec<OutputAction> {
         let chord_key_set: HashSet<String> = chord.keys.iter().cloned().collect();
 
-        // Pending keys that are part of this chord had speculative kana emitted.
-        let pending_chord: HashSet<String> = self.pending_keys.iter()
-            .map(|(k, _)| k.clone())
-            .filter(|k| chord_key_set.contains(k))
-            .collect();
-
+        // Rewrite only UNCONFIRMED tentative chars whose source keys are all part
+        // of this chord. A char is confirmed once any of its source keys is
+        // released, so this never touches already-committed kana even when its
+        // source key belongs to this chord. (Without the confirmed check, typing
+        // あ(j) か(f) then が(f+j) would see あ's [j] and か's [f] as subsets of
+        // {f,j} and backspace them too.)
         let affected = self.tentative_buffer.iter().rev()
-            .take_while(|tc| tc.source_keys.iter().any(|k| pending_chord.contains(k)))
+            .take_while(|tc| {
+                !tc.confirmed
+                    && !tc.source_keys.is_empty()
+                    && tc.source_keys.iter().all(|k| chord_key_set.contains(k))
+            })
             .count();
 
-        let mut actions: Vec<OutputAction> = std::iter::repeat_n(OutputAction::Backspace, affected).collect();
-        self.tentative_buffer.truncate(self.tentative_buffer.len() - affected);
+        let mut actions = self.pop_tentative(affected);
 
         self.pending_keys.retain(|(k, _)| !chord_key_set.contains(k));
+        // Mark all chord keys consumed: while still physically held they must not
+        // re-fire this chord during fast rolling input (see find_mutual_chord_match).
+        for k in &chord.keys {
+            self.chord_consumed_keys.insert(k.clone());
+        }
 
         let output = chord.output.clone();
         let source_keys = chord.keys.clone();
@@ -866,6 +1007,28 @@ impl StateMachine {
         self.layout.settings.chord_window_ms
     }
 
+    /// C1: drop pending keys that fall outside their chord window relative to `now`.
+    ///
+    /// Each pending key is kept only while `now - ts <= chord_window_for(key)`.
+    /// Prefix sequences manage their own lifecycle (the trigger persists until the
+    /// sequence resolves or a non-matching key clears it), so they are left intact.
+    fn prune_expired_pending(&mut self, now: Instant) {
+        if self.pending_keys.len() < 2 || self.has_prefix_continuation() {
+            return;
+        }
+        // Build the kept set with only immutable borrows (chord_window_for reads
+        // self.layout), then replace, to avoid a borrow conflict with retain.
+        let kept: Vec<(String, Instant)> = self
+            .pending_keys
+            .iter()
+            .filter(|(k, ts)| {
+                now.duration_since(*ts).as_millis() as u64 <= u64::from(self.chord_window_for(k))
+            })
+            .cloned()
+            .collect();
+        self.pending_keys = kept;
+    }
+
     fn update_chord_deadline(&mut self) {
         self.chord_deadline = self
             .tentative_buffer
@@ -881,6 +1044,13 @@ impl StateMachine {
             || token.starts_with("C-")
             || token.starts_with("A-")
             || token.starts_with("M-")
+    }
+
+    /// Check if a key is a Mozc control/editing key (C4).
+    /// These keys are sent to Mozc during composition for conversion and navigation.
+    /// Keys NOT in this set trigger SubmitThenPassthrough during composition.
+    fn is_mozc_control_key(key: &str) -> bool {
+        MOZC_CONTROL_KEYS.contains(&key)
     }
 
     /// Convert an output string from the layout config into the appropriate OutputAction.
@@ -938,22 +1108,37 @@ impl StateMachine {
             );
             actions.push(action);
             if !skip_tentative {
-                self.tentative_buffer.push(TentativeChar {
-                    kana: token.to_string(),
-                    source_keys: source_keys.clone(),
+                self.tentative_buffer.push(TentativeChar::new(
+                    token.to_string(),
+                    source_keys.clone(),
                     rewrite_deadline,
-                    pending_tail: Vec::new(),
-                });
+                    Vec::new(),
+                ));
             }
         }
         actions
     }
 
+    /// Remove the last `n` tentative chars and return one BackSpace per Mozc
+    /// preedit character they occupied. Centralizes the H1 invariant (a tentative
+    /// entry may hold a multi-character kana) for all rewrite paths.
+    fn pop_tentative(&mut self, n: usize) -> Vec<OutputAction> {
+        let split = self.tentative_buffer.len() - n;
+        let chars: usize = self.tentative_buffer[split..].iter().map(|tc| tc.mozc_char_len).sum();
+        self.tentative_buffer.truncate(split);
+        std::iter::repeat_n(OutputAction::Backspace, chars).collect()
+    }
+
     /// Emit backspaces for all tentative chars (used before kanchoku commit, reset, etc.)
     fn flush_tentative(&mut self) -> Vec<OutputAction> {
-        let count = self.tentative_buffer.len();
-        self.tentative_buffer.clear();
-        std::iter::repeat_n(OutputAction::Backspace, count).collect()
+        self.pop_tentative(self.tentative_buffer.len())
+    }
+
+    /// True while a Mozc composition/conversion is active: there is speculative
+    /// kana in the tentative buffer, or Mozc has reported CONVERSION mode.
+    /// Control keys (space, Henkan, …) are routed to Mozc while this holds.
+    fn is_composing(&self) -> bool {
+        !self.tentative_buffer.is_empty() || self.mozc_mode == MozcMode::Conversion
     }
 
     // ── Mozc output feedback ──────────────────────────────────────────────────
@@ -963,6 +1148,12 @@ impl StateMachine {
         if self.mozc_mode != MozcMode::Conversion {
             self.tentative_buffer.clear();
             self.pending_keys.clear();
+            // Entering conversion starts a fresh input cycle: drop physical-hold
+            // tracking so a key still held from the pre-conversion chord can't
+            // linger and misfire (and so a subsequent press of that key is not
+            // mistaken for an auto-repeat and swallowed).
+            self.held_keys.clear();
+            self.chord_consumed_keys.clear();
         }
         self.mozc_mode = MozcMode::Conversion;
     }
@@ -981,9 +1172,19 @@ impl StateMachine {
             .collect()
     }
 
+    #[cfg(test)]
+    pub fn debug_pending(&self) -> Vec<String> {
+        self.pending_keys.iter().map(|(k, _)| k.clone()).collect()
+    }
+
     pub fn is_direct_active(&self) -> bool {
         self.direct_trigger_state == DirectTriggerState::Active
             || self.layout.meta.mode == LayoutMode::Kanchoku
+    }
+
+    /// Access the layout's global `[settings]` (for the engine / FFI layer).
+    pub fn settings(&self) -> &crate::config::Settings {
+        &self.layout.settings
     }
 }
 

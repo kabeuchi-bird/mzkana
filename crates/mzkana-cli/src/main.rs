@@ -122,6 +122,16 @@ fn cmd_validate(path: &Path) {
         layout.chords.len(),
         layout.directs.len()
     );
+
+    let conflicts = mzkana_core::analyze_conflicts(&layout);
+    if conflicts.is_empty() {
+        println!("conflicts: none");
+    } else {
+        println!("conflicts: {}", conflicts.len());
+        for c in &conflicts {
+            println!("  ⚠ {}", c.message);
+        }
+    }
 }
 
 fn cmd_run(path: &Path, keys: &str) {
@@ -202,8 +212,11 @@ fn dispatch_to_mozc(mozc: &mut MozcClient, action: &OutputAction) -> Result<Opti
             println!("commit_direct({s})");
             Ok(Some(out))
         }
-        // SendFunctionKey: unmapped keys (Muhenkan etc.) return Err(Protocol) which propagates.
+        // SendFunctionKey: unmapped keys return Err(Protocol) which propagates.
         OutputAction::SendFunctionKey(name) => mozc.send_function_key(name).map(Some),
+        // SubmitThenPassthrough: commit the current preedit, then the raw key passes
+        // through to the application (no app in the CLI, so the output is dropped).
+        OutputAction::SubmitThenPassthrough(_) => mozc.submit().map(|_| None),
         OutputAction::CommitDirect(_) | OutputAction::Passthrough(_) => Ok(None),
         OutputAction::SendModifiedKey { key, mods } => {
             // CLI has no application to forward to; log and attempt Mozc routing.
@@ -233,7 +246,8 @@ fn print_action(action: &OutputAction) {
         OutputAction::Backspace          => println!("backspace"),
         OutputAction::CommitDirect(s)    => println!("commit_direct({s})"),
         OutputAction::SubmitAndCommit(s) => println!("submit_and_commit({s})"),
-        OutputAction::Passthrough(k)     => println!("passthrough({k})"),
+        OutputAction::Passthrough(k)          => println!("passthrough({k})"),
+        OutputAction::SubmitThenPassthrough(k) => println!("submit_then_passthrough({k})"),
         OutputAction::MozcSubmit         => println!("mozc_submit"),
         OutputAction::SendFunctionKey(k) => println!("send_function_key({k})"),
         OutputAction::SendModifiedKey { key, mods } => println!("modified_key(mods={mods:#04b}, key={key})"),

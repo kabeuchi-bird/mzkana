@@ -12,6 +12,11 @@ thiserror = "1"
 tracing = "0.1"
 phf = { version = "0.11", features = ["macros"] }
 libc = "0.2"
+prost = "0.14"
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 insta = "1"

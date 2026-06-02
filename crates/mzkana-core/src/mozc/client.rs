@@ -12,12 +12,11 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::FromRawFd;
 
-use super::codec::DecodeError;
 use super::proto::{
-    composition_mode, decode_response, encode_command, input_create_session,
-    input_delete_session, input_revert, input_send_kana, input_send_key_code_with_mods,
-    input_send_special, input_send_special_with_mods, input_submit,
-    input_turn_on_ime, special_key, DecodedOutput,
+    composition_mode, decode_response, input_create_session, input_delete_session,
+    input_revert, input_send_kana, input_send_key_code_with_mods, input_send_special,
+    input_send_special_with_mods, input_submit, input_turn_on_ime, special_key,
+    DecodedOutput,
 };
 use super::MozcOutput;
 
@@ -191,7 +190,7 @@ pub fn ipc_key_from_socket_name(abs_name: &str) -> Option<Vec<u8>> {
 #[derive(Debug)]
 pub enum MozcError {
     Io(io::Error),
-    Decode(DecodeError),
+    Decode(prost::DecodeError),
     Protocol(String),
     NotConnected,
 }
@@ -209,7 +208,7 @@ impl std::fmt::Display for MozcError {
 
 impl std::error::Error for MozcError {}
 impl From<io::Error> for MozcError { fn from(e: io::Error) -> Self { Self::Io(e) } }
-impl From<DecodeError> for MozcError { fn from(e: DecodeError) -> Self { Self::Decode(e) } }
+impl From<prost::DecodeError> for MozcError { fn from(e: prost::DecodeError) -> Self { Self::Decode(e) } }
 
 /// Blocking Mozc IPC client.
 ///
@@ -350,8 +349,10 @@ impl MozcClient {
             #[cfg(not(target_os = "linux"))]
             { return Err(io::Error::new(io::ErrorKind::Unsupported, "abstract sockets unsupported")); }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        // Socket-level timeout is a backstop only.  The primary UI-freeze guard is
+        // the worker thread's 150 ms hard timeout (see mozc::worker); keep this short.
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         Ok(stream)
     }
 
@@ -359,16 +360,15 @@ impl MozcClient {
     ///
     /// Mozc IPC wire protocol (confirmed from `unix_ipc.cc` and `session_server.cc`):
     ///   - NO length framing in either direction.
-    ///   - Client sends raw `Input` protobuf bytes (via `encode_command`), then
+    ///   - Client sends raw `Input` protobuf bytes, then
     ///     `shutdown(SHUT_WR)`.  The shutdown signals end-of-request; without it
     ///     the server blocks waiting for more data and the call times out.
     ///   - Server reads until EOF, processes, writes raw `Output` protobuf bytes,
     ///     then closes the connection.
     fn send_recv(&self, input: &super::proto::EncodedInput) -> Result<DecodedOutput, MozcError> {
         let mut stream = self.new_connection()?;
-        let cmd_bytes = encode_command(input);
 
-        stream.write_all(&cmd_bytes)?;
+        stream.write_all(&input.0)?;
         // Half-close the write side so the server knows the request is complete.
         stream.shutdown(std::net::Shutdown::Write)?;
 
@@ -402,18 +402,11 @@ impl MozcClient {
         let out = self.send_recv(&input_create_session())?;
         let sid = out.session_id
             .ok_or_else(|| MozcError::Protocol("CREATE_SESSION returned no id".into()))?;
-        eprintln!("[mzkana] CREATE_SESSION → session_id={sid}");
         self.session_id = Some(sid);
-        // New sessions start in IME-OFF (Direct) state.  TURN_ON_IME activates the IME
+        // C3: New sessions start in IME-OFF (Direct) state.  TURN_ON_IME activates the IME
         // and sets the composition mode in one step — SWITCH_COMPOSITION_MODE alone does
         // not transition out of IME-OFF and leaves mode=0 unchanged.
-        match self.send_recv(&input_turn_on_ime(sid, composition_mode::HIRAGANA as u64)) {
-            Ok(out) => eprintln!(
-                "[mzkana] TURN_ON_IME(HIRAGANA) → consumed={} mode={} preedit={:?}",
-                out.consumed, out.mode, out.preedit_text
-            ),
-            Err(e) => eprintln!("[mzkana] TURN_ON_IME failed: {e}; preedit may not work"),
-        }
+        self.send_recv(&input_turn_on_ime(sid, composition_mode::HIRAGANA))?;
         Ok(())
     }
 
@@ -425,22 +418,14 @@ impl MozcClient {
         Ok(MozcOutput::from_decoded(self.send_recv(input)?))
     }
 
-    fn send_special_key(&self, code: u64) -> Result<MozcOutput, MozcError> {
+    fn send_special_key(&self, code: i32) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         self.dispatch(&input_send_special(sid, code))
     }
 
     pub fn send_kana(&self, kana: &str) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
-        let result = self.dispatch(&input_send_kana(sid, kana));
-        match &result {
-            Ok(out) => eprintln!(
-                "[mzkana] send_kana({kana:?}) → consumed={} preedit={:?} result={:?} mode={}",
-                out.consumed, out.preedit, out.result, out.mode
-            ),
-            Err(e) => eprintln!("[mzkana] send_kana({kana:?}) FAILED: {e}"),
-        }
-        result
+        self.dispatch(&input_send_kana(sid, kana))
     }
 
     pub fn send_backspace(&self) -> Result<MozcOutput, MozcError> {
@@ -485,7 +470,7 @@ impl MozcClient {
 }
 
 /// Map an XKB keysym name to a Mozc SpecialKey value.
-pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
+pub fn xkb_name_to_mozc_special(name: &str) -> Option<i32> {
     match name {
         "Return"            => Some(special_key::ENTER),
         "Tab"               => Some(special_key::TAB),
@@ -503,11 +488,12 @@ pub fn xkb_name_to_mozc_special(name: &str) -> Option<u64> {
         "Next"  | "PageDown" => Some(special_key::PAGE_DOWN),
         "space"             => Some(special_key::SPACE),
         "Henkan"            => Some(special_key::HENKAN),
+        "Muhenkan"          => Some(special_key::MUHENKAN),
         "Hiragana_Katakana" => Some(special_key::KANA),
-        // F1–F12: SpecialKey values 19–30
-        s if s.starts_with('F') => s[1..].parse::<u64>().ok()
+        // F1–F12: contiguous SpecialKey values starting at F1 (19).
+        s if s.starts_with('F') => s[1..].parse::<i32>().ok()
             .filter(|&n| (1..=12).contains(&n))
-            .map(|n| 18 + n),
+            .map(|n| special_key::F1 + (n - 1)),
         _ => None,
     }
 }

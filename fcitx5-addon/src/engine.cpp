@@ -2,6 +2,7 @@
 
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
+#include <fcitx-utils/capabilityflags.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputmethodentry.h>
@@ -45,6 +46,17 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
     auto *ic = keyEvent.inputContext();
     const fcitx::Key &key = keyEvent.key();
 
+    // H2: sensitive (password) fields. Honor sensitive_field_behavior:
+    //   passthrough(0) → don't run the IME, let the app handle keys (nothing exposed).
+    //   buffer(1)      → process normally but the preedit is never shown in such
+    //                    fields (applyResult suppresses it below), so kana still
+    //                    composes without leaking to the panel.
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
+        if (mzkana_engine_sensitive_field_behavior(engine_) == 0) {
+            return;
+        }
+    }
+
     // Skip Ctrl / Alt / Super / Hyper — let the application handle these.
     fcitx::KeyStates badMods = {
         fcitx::KeyState::Ctrl,
@@ -85,8 +97,12 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
         keyEvent.filterAndAccept();
     }
 
-    // Hot-reload: check on every key event (inotify debounce makes this cheap)
-    mzkana_engine_check_reload(engine_);
+    // Hot-reload: check on every key event (inotify debounce makes this cheap).
+    // On reload the composition is reverted in the engine, so clear the now-stale
+    // preedit from the UI too (H4).
+    if (mzkana_engine_check_reload(engine_)) {
+        clearPreedit(ic);
+    }
 
     // Update status area if Mozc availability changed (e.g. reconnected after startup).
     bool nowAvailable = mzkana_engine_mozc_available(engine_);
@@ -108,9 +124,13 @@ void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
         fcitx::UserInterfaceComponent::StatusArea);
 }
 
-void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry &entry,
+void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry & /*entry*/,
                                     fcitx::InputContextEvent &event) {
-    reset(entry, event);
+    // H3: honor on_focus_change (preserve / reset) on focus loss.
+    if (engine_) {
+        mzkana_engine_focus_out(engine_);
+    }
+    clearPreedit(event.inputContext());
 }
 
 void MzkanaFcitxEngine::reset(const fcitx::InputMethodEntry & /*entry*/,
@@ -148,18 +168,51 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
     std::string preedit(
         reinterpret_cast<const char *>(result.preedit), result.preedit_len);
 
-    fcitx::Text preeditText;
-    if (!preedit.empty()) {
-        preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
-        preeditText.setCursor(static_cast<int>(preedit.size()));
+    // Only re-render the preedit when it actually changed. This keeps the ~100 Hz
+    // tick timer (C2) cheap: a pure pruning/deadline tick that leaves the preedit
+    // unchanged costs no UI update.
+    if (preedit != lastPreedit_) {
+        // H2: never show a preedit in a password/sensitive field — it would leak
+        // what is being typed to the floating panel.
+        const bool sensitive =
+            ic->capabilityFlags().test(fcitx::CapabilityFlag::Password);
+
+        fcitx::Text preeditText;
+        if (!preedit.empty() && !sensitive) {
+            preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
+            preeditText.setCursor(static_cast<int>(preedit.size()));
+        }
+
+        // Preedit display:
+        //   - Clients that support inline preedit always get it inline
+        //     (setClientPreedit), which is what most apps render in-place.
+        //   - For clients that cannot, preedit_fallback decides the fallback:
+        //     buffer(2) shows nothing; client/panel/auto show the floating panel.
+        const bool clientCapable =
+            ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit);
+
+        if (clientCapable) {
+            // Inline preedit in the client. Also mirror to the panel so it stays
+            // visible if the client chooses not to render it.
+            ic->inputPanel().setClientPreedit(preeditText);
+            ic->inputPanel().setPreedit(preeditText);
+        } else if (mzkana_engine_preedit_fallback(engine_) == 2 /* buffer */) {
+            // Keep composing internally but show nothing.
+            ic->inputPanel().setClientPreedit(fcitx::Text());
+            ic->inputPanel().setPreedit(fcitx::Text());
+        } else {
+            // Floating panel fallback (client/panel/auto for non-inline clients).
+            ic->inputPanel().setClientPreedit(fcitx::Text());
+            ic->inputPanel().setPreedit(preeditText);
+        }
+        ic->updatePreedit();
+        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        lastPreedit_ = preedit;
     }
 
-    // setClientPreedit → inline in capable clients
-    // setPreedit → floating panel as fallback
-    ic->inputPanel().setClientPreedit(preeditText);
-    ic->inputPanel().setPreedit(preeditText);
-    ic->updatePreedit();
-    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    // Run the tick timer while a preedit is active so chord-confirm deadlines and
+    // deferred compound-output tails fire even without further key input.
+    updateTickTimer(!preedit.empty(), ic);
 
     if (result.forward_key_len > 0) {
         std::string keyName(reinterpret_cast<const char *>(result.forward_key),
@@ -191,6 +244,57 @@ void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {
     ic->inputPanel().setPreedit(fcitx::Text());
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    lastPreedit_.clear();
+    // No preedit left → stop the tick timer.
+    if (tickTimer_) {
+        tickTimer_->setEnabled(false);
+    }
+}
+
+// ── C2: periodic tick wiring ────────────────────────────────────────────────────
+
+void MzkanaFcitxEngine::updateTickTimer(bool active, fcitx::InputContext *ic) {
+    constexpr uint64_t kTickIntervalUs = 10000; // 10 ms
+
+    if (!active) {
+        if (tickTimer_) {
+            tickTimer_->setEnabled(false);
+        }
+        return;
+    }
+
+    // Remember which input context the timer callback should drive.
+    tickIc_ = ic->watch();
+
+    if (!tickTimer_) {
+        tickTimer_ = instance_->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + kTickIntervalUs, 0,
+            [this](fcitx::EventSourceTime *, uint64_t) {
+                // onTick() runs applyResult(), which re-arms or stops this timer
+                // via updateTickTimer() depending on whether a preedit remains.
+                onTick();
+                return true;
+            });
+    } else {
+        tickTimer_->setNextInterval(kTickIntervalUs);
+        tickTimer_->setOneShot();
+        tickTimer_->setEnabled(true);
+    }
+}
+
+void MzkanaFcitxEngine::onTick() {
+    if (!engine_) {
+        return;
+    }
+    auto *ic = tickIc_.get();
+    if (!ic) {
+        // Input context went away — stop ticking.
+        if (tickTimer_) {
+            tickTimer_->setEnabled(false);
+        }
+        return;
+    }
+    applyResult(ic, mzkana_engine_tick(engine_));
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────

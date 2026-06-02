@@ -122,6 +122,33 @@ struct MzkanaResult mzkana_engine_tick(struct MzkanaEngine *engine);
 void mzkana_engine_reset(struct MzkanaEngine *engine);
 
 /**
+ * Handle focus loss, honoring the layout's `on_focus_change` setting
+ * (preserve / reset). Call from the C++ `deactivate` handler.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_focus_out(struct MzkanaEngine *engine);
+
+/**
+ * `sensitive_field_behavior` setting (0 = passthrough, 1 = buffer).
+ * Returns 0 for a NULL engine.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+int32_t mzkana_engine_sensitive_field_behavior(const struct MzkanaEngine *engine);
+
+/**
+ * `preedit_fallback` setting (0 = client, 1 = panel, 2 = buffer, 3 = auto).
+ * Returns 1 (panel) for a NULL engine.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+int32_t mzkana_engine_preedit_fallback(const struct MzkanaEngine *engine);
+
+/**
  * Check whether the config file changed and reload it if so.
  *
  * Returns 1 if the config was reloaded, 0 otherwise.

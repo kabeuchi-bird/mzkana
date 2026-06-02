@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{config::load_layout, statemachine::*};
 
@@ -219,6 +219,36 @@ fn prefix_trigger_alone_stays_base() {
 // ── Chord (新下駄) ────────────────────────────────────────────────────────────
 
 #[test]
+fn chord_within_window_fires() {
+    // C1: f then j within chord_window_ms (50ms) → chord [f,j] → を, rewrite.
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    let a1 = m.process(InputEvent::down("f"), t0);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())));
+    // j arrives 30ms later — inside the 50ms window.
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(30));
+    assert!(a2.contains(&OutputAction::Backspace), "{a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("を".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "を");
+}
+
+#[test]
+fn chord_past_window_does_not_fire() {
+    // C1 regression: f then j after chord_window_ms (50ms) must NOT chord. The
+    // stale f is pruned, so j just emits its own base kana — no false rewrite.
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    let a1 = m.process(InputEvent::down("f"), t0);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())));
+    // j arrives 200ms later — well past the 50ms window.
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(200));
+    assert!(!a2.contains(&OutputAction::Backspace), "no rewrite expected: {a2:?}");
+    assert!(!a2.contains(&OutputAction::SendKana("を".to_string())), "no chord expected: {a2:?}");
+    // き stays, and j contributes its own base kana on top.
+    assert!(m.tentative_kana_string().starts_with('き'), "got {:?}", m.tentative_kana_string());
+}
+
+#[test]
 fn chord_rewrite() {
     let mut m = sm(SHIN_GETA);
     let now = Instant::now();
@@ -307,6 +337,88 @@ fn mutual_chord_rollover() {
     // 「が」must NOT have been backspaced
     assert!(!a_ej.contains(&OutputAction::Backspace), "「が」must not be overwritten: {a_ej:?}");
     assert_eq!(m.tentative_kana_string(), "がで");
+}
+
+#[test]
+fn mutual_chord_after_chord_no_extra_backspace() {
+    // Regression: a mutual chord fully pressed and released, then a second mutual
+    // chord that reuses the shared key. The second chord must only rewrite its own
+    // speculative kana — it must NOT backspace the first chord's confirmed output
+    // just because the two chords share the 'j' key.
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    // (f j) → が, then fully release both keys.
+    m.process(InputEvent::down("j"), now);
+    let a_fg = m.process(InputEvent::down("f"), now);
+    assert!(a_fg.contains(&OutputAction::SendKana("が".to_string())), "{a_fg:?}");
+    m.process(InputEvent::up("f"), now);
+    m.process(InputEvent::up("j"), now);
+    assert_eq!(m.tentative_kana_string(), "が");
+
+    // (e j) → で as a fresh chord. 'j' is shared with the (f j) chord, but 「が」
+    // is already confirmed and must survive untouched.
+    m.process(InputEvent::down("j"), now);
+    let a_ej = m.process(InputEvent::down("e"), now);
+    assert!(a_ej.contains(&OutputAction::SendKana("で".to_string())), "second chord must fire: {a_ej:?}");
+    assert!(!a_ej.contains(&OutputAction::Backspace), "「が」must not be backspaced: {a_ej:?}");
+    assert_eq!(m.tentative_kana_string(), "がで");
+}
+
+#[test]
+fn mutual_chord_lingering_key_does_not_refire() {
+    // Regression (fast rolling): the first chord's key is released LATE, so it
+    // lingers in held_keys while the next chord is typed. The lingering key must
+    // not re-fire its old chord — the new chord's own key takes precedence.
+    //   が = (f j); then with f still held, type e+j → で (not another が).
+    let layout = load_layout(MUTUAL_CHORD_LAYOUT).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    m.process(InputEvent::down("f"), now);
+    let a_g = m.process(InputEvent::down("j"), now);
+    assert!(a_g.contains(&OutputAction::SendKana("が".to_string())), "{a_g:?}");
+    m.process(InputEvent::up("j"), now); // release j, but f lingers (no f-up yet)
+
+    // e+j while f is still physically held.
+    m.process(InputEvent::down("e"), now);
+    let a_de = m.process(InputEvent::down("j"), now);
+    assert!(
+        a_de.contains(&OutputAction::SendKana("で".to_string())),
+        "lingering 'f' must not re-fire (f,j)→が; expected (e,j)→で: {a_de:?}"
+    );
+    assert!(
+        !a_de.contains(&OutputAction::SendKana("が".to_string())),
+        "stale chord (f,j)→が must not re-fire: {a_de:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "がで");
+}
+
+#[test]
+fn mutual_chord_after_singles_sharing_keys() {
+    // Regression (あかが): single kana whose keys overlap the next chord's keys
+    // must stay committed. あ=j, か=f, が=(f,j). Typing あ か then が must only
+    // rewrite the immediately-preceding speculative kana, not the already-released
+    // あ/か — they are confirmed on key-up.
+    let layout = load_layout(NAGINATA).unwrap();
+    let mut m = StateMachine::new(layout);
+    let now = Instant::now();
+
+    m.process(InputEvent::down("j"), now); // あ
+    m.process(InputEvent::up("j"), now);
+    m.process(InputEvent::down("f"), now); // か
+    m.process(InputEvent::up("f"), now);
+    assert_eq!(m.tentative_kana_string(), "あか");
+
+    // が = f+j. Only one BackSpace expected (for the just-typed speculative か… but
+    // here か was already released → confirmed, so NO backspace at all).
+    m.process(InputEvent::down("f"), now);
+    let a_ga = m.process(InputEvent::down("j"), now);
+    assert!(a_ga.contains(&OutputAction::SendKana("が".to_string())), "{a_ga:?}");
+    let bs = a_ga.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert!(bs <= 1, "committed あか must not be backspaced; got {bs} BackSpaces: {a_ga:?}");
+    assert_eq!(m.tentative_kana_string(), "あかが", "{a_ga:?}");
 }
 
 #[test]
@@ -876,7 +988,9 @@ fn dual_role_hold_emits_shifted_kana() {
 
 #[test]
 fn send_key_is_alias_for_passthrough() {
-    // "send_key" should deserialize identically to "passthrough".
+    // "send_key" should deserialize identically to "passthrough". Use a NON-control
+    // key as the modifier: control keys (space, …) are always routed to Mozc on
+    // tap, which would mask the passthrough behavior under test.
     let toml = r#"
 [meta]
 name = "test"
@@ -884,16 +998,16 @@ mode = "kana"
 schema = 1
 [[modifier]]
 id         = "m"
-key        = "space"
+key        = "muhenkan_placeholder"
 tap_action = "send_key"
 "#;
     let layout = load_layout(toml).unwrap();
     let mut m = StateMachine::new(layout);
     let now = Instant::now();
-    m.process(InputEvent::down("space"), now);
-    let actions = m.process(InputEvent::up("space"), now);
+    m.process(InputEvent::down("muhenkan_placeholder"), now);
+    let actions = m.process(InputEvent::up("muhenkan_placeholder"), now);
     assert!(
-        actions.contains(&OutputAction::Passthrough("space".to_string())),
+        actions.contains(&OutputAction::Passthrough("muhenkan_placeholder".to_string())),
         "send_key tap should produce passthrough: {actions:?}"
     );
 }
@@ -1320,138 +1434,45 @@ tap_output = "あ"
     assert!(load_layout(toml).is_err());
 }
 
-// ── Mozc codec unit tests ─────────────────────────────────────────────────────
+// ── Mozc proto encode/decode tests ─────────────────────────────────────────────
 
 #[cfg(test)]
-mod codec_tests {
-    use crate::mozc::codec::{decode, find_bytes, find_msg, find_varint, write_len_field, write_varint_field};
-
-    fn round_trip_varint(field: u32, value: u64) {
-        let mut buf = Vec::new();
-        write_varint_field(&mut buf, field, value);
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_varint(&fields, field), Some(value));
-    }
-
-    #[test]
-    fn codec_varint_roundtrip_small() {
-        round_trip_varint(1, 0);
-        round_trip_varint(1, 1);
-        round_trip_varint(2, 127);
-        round_trip_varint(3, 128);
-        round_trip_varint(15, u64::MAX);
-    }
-
-    #[test]
-    fn codec_len_field_roundtrip() {
-        let data = "かきくけこ".as_bytes();
-        let mut buf = Vec::new();
-        write_len_field(&mut buf, 5, data);
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_bytes(&fields, 5), Some(data));
-    }
-
-    #[test]
-    fn codec_multiple_fields() {
-        let mut buf = Vec::new();
-        write_varint_field(&mut buf, 1, 42);
-        write_len_field(&mut buf, 2, b"hello");
-        write_varint_field(&mut buf, 3, 99);
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_varint(&fields, 1), Some(42));
-        assert_eq!(find_bytes(&fields, 2), Some(b"hello".as_slice()));
-        assert_eq!(find_varint(&fields, 3), Some(99));
-    }
-
-    #[test]
-    fn codec_nested_message_roundtrip() {
-        // inner = { field 2: "かな" }
-        let mut inner = Vec::new();
-        write_len_field(&mut inner, 2, "かな".as_bytes());
-        let mut outer = Vec::new();
-        write_varint_field(&mut outer, 1, 7);
-        write_len_field(&mut outer, 4, &inner);
-        let fields = decode(&outer).unwrap();
-        assert_eq!(find_varint(&fields, 1), Some(7));
-        let inner_fields = find_msg(&fields, 4).unwrap().unwrap();
-        assert_eq!(find_bytes(&inner_fields, 2), Some("かな".as_bytes()));
-    }
-
-    #[test]
-    fn codec_group_encode_decode() {
-        // Proto2 group: field 2, START_GROUP wire=3, fields, END_GROUP wire=4
-        // Start:  tag = (2 << 3) | 3 = 0x13
-        // End:    tag = (2 << 3) | 4 = 0x14
-        let mut buf = Vec::new();
-        write_varint_field(&mut buf, 1, 3); // Preedit.cursor = 3
-        buf.push(0x13);                     // Segment group start
-        write_varint_field(&mut buf, 3, 2); // Segment.annotation = HIGHLIGHT(2)
-        write_len_field(&mut buf, 4, "変換".as_bytes()); // Segment.value
-        buf.push(0x14);                     // Segment group end
-
-        let fields = decode(&buf).unwrap();
-        assert_eq!(find_varint(&fields, 1), Some(3));
-        let seg_fields = find_msg(&fields, 2).unwrap().unwrap();
-        assert_eq!(find_varint(&seg_fields, 3), Some(2)); // HIGHLIGHT
-        assert_eq!(find_bytes(&seg_fields, 4), Some("変換".as_bytes()));
-    }
+mod proto_tests {
+    use crate::mozc::proto::mozc::commands::{preedit::Segment, Output, Preedit, Result as MResult};
+    use crate::mozc::proto::{decode_response, input_send_kana, Input};
+    use prost::Message;
 
     #[test]
     fn proto_encode_send_kana_is_non_empty() {
-        use crate::mozc::proto::{encode_command, input_send_kana};
-        let encoded = encode_command(&input_send_kana(1234, "あ"));
-        assert!(!encoded.is_empty());
-        // encode_command returns raw Input bytes (no Command wrapper).
-        let fields = decode(&encoded).unwrap();
-        // Input.type = SEND_KEY (3)
-        assert_eq!(find_varint(&fields, 1), Some(3), "Input.type should be SEND_KEY=3");
-        // Input.id = 1234
-        assert_eq!(find_varint(&fields, 2), Some(1234), "Input.id should be 1234");
+        let encoded = input_send_kana(1234, "あ");
+        assert!(!encoded.0.is_empty());
+        let input = Input::decode(&encoded.0[..]).expect("decode Input");
+        assert_eq!(input.r#type, 3, "Input.type should be SEND_KEY=3");
+        assert_eq!(input.id, Some(1234), "Input.id should be 1234");
     }
 
-    /// Build a Command{output: Output{...}} with preedit segments (including HIGHLIGHT)
-    /// and verify that decode_response() extracts all fields correctly.
+    /// Build an Output with preedit segments (including HIGHLIGHT) and verify that
+    /// decode_response() extracts all fields correctly.
     #[test]
     fn decode_response_full_roundtrip() {
-        use crate::mozc::proto::decode_response;
+        // annotation: UNDERLINE=1, HIGHLIGHT=2; Result.type: STRING=1
+        let output = Output {
+            id: Some(42),
+            mode: Some(1), // HIRAGANA
+            consumed: Some(true),
+            result: Some(MResult { r#type: 1, value: "変換".to_string(), ..Default::default() }),
+            preedit: Some(Preedit {
+                cursor: 2,
+                segment: vec![
+                    Segment { annotation: 1, value: "か".to_string(), value_length: 1, ..Default::default() },
+                    Segment { annotation: 2, value: "な".to_string(), value_length: 1, ..Default::default() },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
 
-        // ── Build Result { type=STRING(1), value="変換" } ──────────────────
-        let mut result_msg = Vec::new();
-        write_varint_field(&mut result_msg, 1, 1);                      // type = STRING
-        write_len_field(&mut result_msg, 2, "変換".as_bytes());          // value
-
-        // ── Build Preedit with two Segments using proto2 group encoding ────
-        //    group start: tag = (2 << 3) | 3 = 0x13
-        //    group end:   tag = (2 << 3) | 4 = 0x14
-        let mut preedit_msg = Vec::new();
-        write_varint_field(&mut preedit_msg, 1, 2);   // cursor = 2
-        // Segment 1: UNDERLINE, value = "か"
-        // Mozc proto2 group: field numbers continue from group field (2):
-        //   annotation=3, value=4, value_length=5, key=6
-        preedit_msg.push(0x13);
-        write_varint_field(&mut preedit_msg, 3, 1);   // annotation = UNDERLINE
-        write_len_field(&mut preedit_msg, 4, "か".as_bytes());
-        write_varint_field(&mut preedit_msg, 5, 1);   // value_length = 1
-        preedit_msg.push(0x14);
-        // Segment 2: HIGHLIGHT, value = "な"
-        preedit_msg.push(0x13);
-        write_varint_field(&mut preedit_msg, 3, 2);   // annotation = HIGHLIGHT
-        write_len_field(&mut preedit_msg, 4, "な".as_bytes());
-        write_varint_field(&mut preedit_msg, 5, 1);   // value_length = 1
-        preedit_msg.push(0x14);
-
-        // ── Build Output ──────────────────────────────────────────────────
-        let mut output_msg = Vec::new();
-        write_varint_field(&mut output_msg, 1, 42);              // id = 42
-        write_varint_field(&mut output_msg, 2, 1);               // mode = HIRAGANA
-        write_varint_field(&mut output_msg, 3, 1);               // consumed = true
-        write_len_field(&mut output_msg, 4, &result_msg);        // result
-        write_len_field(&mut output_msg, 5, &preedit_msg);       // preedit
-
-        // decode_response expects raw Output bytes (no Command wrapper).
-
-        // ── Decode and verify ─────────────────────────────────────────────
-        let out = decode_response(&output_msg).expect("decode_response failed");
+        let out = decode_response(&output.encode_to_vec()).expect("decode_response failed");
         assert_eq!(out.session_id, Some(42));
         assert_eq!(out.mode, 1); // HIRAGANA
         assert!(out.consumed);
@@ -1576,4 +1597,233 @@ save = "S-C-s"
         }),
         "alias containing modifier key token must expand correctly, got {actions:?}"
     );
+}
+
+// ── C4: Unassigned key routing during composition ──────────────────────────────
+
+const C4_TOML: &str = r#"
+[meta]
+name = "test"
+mode = "kana"
+schema = 1
+[[layer]]
+id   = "base"
+kind = "single"
+grid = """
+. 1
+. a
+1 あ
+"""
+"#;
+
+fn c4_sm_composing() -> StateMachine {
+    let mut m = sm(C4_TOML);
+    let actions = press_seq(&mut m, &["a"]);
+    assert!(
+        actions.iter().any(|a| matches!(a, OutputAction::SendKana(_))),
+        "pressing 'a' should start composition"
+    );
+    m
+}
+
+#[test]
+fn c4_unassigned_control_key_during_composition() {
+    let mut m = c4_sm_composing();
+    let actions = m.process(InputEvent::down("space"), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("space".to_string())),
+        "unassigned control key during composition should be SendFunctionKey, got {actions:?}"
+    );
+}
+
+#[test]
+fn c4_unassigned_non_control_key_during_composition() {
+    let mut m = c4_sm_composing();
+    let actions = m.process(InputEvent::down("x"), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::SubmitThenPassthrough("x".to_string())),
+        "unassigned non-control key during composition should be SubmitThenPassthrough, got {actions:?}"
+    );
+}
+
+#[test]
+fn c4_unassigned_key_outside_composition() {
+    let mut m = sm(C4_TOML);
+    let actions = m.process(InputEvent::down("x"), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::Passthrough("x".to_string())),
+        "unassigned key outside composition should be Passthrough, got {actions:?}"
+    );
+}
+
+#[test]
+fn c4_unassigned_key_after_conversion_passes_through() {
+    // After Mozc enters CONVERSION (which clears tentative/pending), a new
+    // unassigned NON-CONTROL key starts fresh: process_key_down resets to
+    // Composition, so the key passes through rather than spuriously submitting.
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion();
+    let actions = m.process(InputEvent::down("x"), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::Passthrough("x".to_string())),
+        "unassigned non-control key after conversion should be Passthrough, got {actions:?}"
+    );
+}
+
+// ── Conversion-mode candidate cycling (Henkan, space) ───────────────────────────
+
+#[test]
+fn conversion_mode_henkan_cycles_repeatedly() {
+    // The conversion key must keep reaching Mozc on every press so candidates can
+    // be cycled — it must NOT reset composition after the first conversion.
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion(); // Mozc reported a highlighted candidate.
+
+    let a1 = m.process(InputEvent::down("Henkan"), Instant::now());
+    assert!(
+        a1.contains(&OutputAction::SendFunctionKey("Henkan".to_string())),
+        "1st Henkan during conversion should reach Mozc, got {a1:?}"
+    );
+    // Still in conversion: a second Henkan must ALSO reach Mozc (next candidate).
+    let a2 = m.process(InputEvent::down("Henkan"), Instant::now());
+    assert!(
+        a2.contains(&OutputAction::SendFunctionKey("Henkan".to_string())),
+        "2nd Henkan during conversion should also reach Mozc, got {a2:?}"
+    );
+}
+
+#[test]
+fn conversion_mode_non_control_key_resets_and_composes() {
+    // A normal kana key during conversion starts a fresh composition.
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion();
+    let a = m.process(InputEvent::down("a"), Instant::now());
+    assert!(
+        a.iter().any(|x| matches!(x, OutputAction::SendKana(_))),
+        "non-control key during conversion should start fresh composition, got {a:?}"
+    );
+}
+
+#[test]
+fn space_tap_triggers_conversion_while_composing() {
+    // Center-shift layouts (naginata) bind space as a hold modifier whose tap
+    // passes through. While composing, a space tap must instead reach Mozc to
+    // trigger conversion (issue: space did nothing in center-shift layouts).
+    let mut m = sm(NAGINATA);
+    let now = Instant::now();
+    // Build a composition: j → あ (speculative).
+    let _ = m.process(InputEvent::down("j"), now);
+    let _ = m.process(InputEvent::up("j"), now);
+    assert!(!m.tentative_kana_string().is_empty(), "j should start composition");
+    // Space tap (down then up, no interrupting key) while composing.
+    let _ = m.process(InputEvent::down("space"), now);
+    let up = m.process(InputEvent::up("space"), now);
+    assert!(
+        up.contains(&OutputAction::SendFunctionKey("space".to_string())),
+        "space tap while composing should trigger Mozc conversion, got {up:?}"
+    );
+}
+
+#[test]
+fn space_tap_sends_to_mozc_when_idle() {
+    // With no active composition, an idle space tap is still routed to Mozc so it
+    // produces a full-width 「　」 (the expected Japanese-IME behavior), rather
+    // than forwarding a raw half-width ASCII space to the application.
+    let mut m = sm(NAGINATA);
+    let now = Instant::now();
+    let _ = m.process(InputEvent::down("space"), now);
+    let up = m.process(InputEvent::up("space"), now);
+    assert!(
+        up.contains(&OutputAction::SendFunctionKey("space".to_string())),
+        "idle space tap should be routed to Mozc, got {up:?}"
+    );
+}
+
+// ── H5: conflict analysis ───────────────────────────────────────────────────────
+
+#[test]
+fn h5_detects_multi_role_key() {
+    // 'd' is both a center-shift modifier and a prefix trigger → ambiguous role.
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. q
+1 か
+"""
+[[layer]]
+id = "pre"
+kind = "prefix"
+trigger = "d"
+grid = """
+. q
+1 ぱ
+"""
+[[modifier]]
+id = "m"
+key = "d"
+kind = "hold"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let conflicts = crate::config::analyze_conflicts(&layout);
+    assert!(
+        conflicts.iter().any(|c| c.message.contains("multiple roles")),
+        "expected a multi-role conflict, got {conflicts:?}"
+    );
+}
+
+#[test]
+fn h5_detects_duplicate_chord() {
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. q w
+1 か き
+"""
+[[chord]]
+keys = ["q", "w"]
+output = "を"
+[[chord]]
+keys = ["w", "q"]
+output = "ん"
+"#;
+    let layout = load_layout(toml).unwrap();
+    let conflicts = crate::config::analyze_conflicts(&layout);
+    assert!(
+        conflicts.iter().any(|c| c.message.contains("more than once")),
+        "expected a duplicate-chord conflict, got {conflicts:?}"
+    );
+}
+
+#[test]
+fn h5_clean_layout_has_no_conflicts() {
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. q w
+1 か き
+"""
+[[chord]]
+keys = ["q", "w"]
+output = "を"
+"#;
+    let layout = load_layout(toml).unwrap();
+    assert!(crate::config::analyze_conflicts(&layout).is_empty());
 }
