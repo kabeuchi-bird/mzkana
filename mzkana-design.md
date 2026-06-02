@@ -1,6 +1,12 @@
-# MzKana 設計書 v0.2
+# MzKana 設計書 v0.3
 
 Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様。
+
+> v0.3 で実装（Phase 1–3 完了時点）に合わせて全面的に整合を取った。設計思想を
+> 示す概念図と、実装の事実が異なる箇所には「実装メモ／注」を付した。主な実装側の
+> 確定事項: 同期 IPC + ワーカースレッド（非 tokio）、proto の vendor + prost-build、
+> かな送信は AS_IS、セッション初期化は TURN_ON_IME、BS-rewrite は preedit 文字数
+> ベース、オートリピート抑止は core 側、設定 GUI は未実装。
 
 ---
 
@@ -95,6 +101,12 @@ Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様�
 
 ## 3. シフト方式の統一抽象
 
+> **実装メモ**: 本章は設計思想（各シフト方式を「制約付きキー列マッチング」に
+> 還元する考え方）を示す。実際の `mzkana-core` は下記の単一 `Rule`/`Pattern` enum
+> ではなく、`Layout` 内の `base_layer` / `prefix_layers` / `postfix_layers` /
+> `modified_layers` / `chords` / `directs` という**個別フィールド**として保持し、
+> `process_key_down` が方式ごとの分岐で評価する。概念モデルとして参照のこと。
+
 各シフト方式を別々に実装すると組合せ爆発する。**全方式を「制約付きキー列マッチング」に還元**する。
 
 ```rust
@@ -146,21 +158,27 @@ enum Output {
 
 fcitx5 が addon に渡す KeyEvent は既に XKB 変換後の keysym を持っている。これをそのまま識別子化する。専用の scancode → 文字テーブルは不要。
 
-**シフトによる文字変化を吸収するため、level 0（修飾なし）の keysym を取得**して使う。
+**実装（`fcitx5-addon/src/engine.cpp`）**: `key.sym()`（解決済み keysym）を使い、
+A–Z（Shift 付き英字）のみ算術的に小文字へ正規化してから `keySymToString` で
+識別子化する。Shift フラグは別途 core に渡す。Ctrl/Alt/Super/Hyper 同時押しと
+bare modifier（Shift_L 等）は評価前に除外する。
 
 ```cpp
-// fcitx5-addon 側
-auto code = event.key().code();
-auto base = xkb_state_key_get_one_sym_for_level(
-    xkb_state, code, /*layout*/ 0, /*level*/ 0);
-auto mods = event.key().states();
-auto is_repeat = event.key().isRepeat();
+// fcitx5-addon: keyEvent
+if (key.states() & {Ctrl, Alt, Super, Hyper}) return;  // 修飾付きはアプリへ
+if (key.isModifier()) return;                          // bare modifier は無視
+bool shift = key.states() & KeyState::Shift;
 
-auto ident = keysym_name(base);   // "a", "q", "comma", "yen" ...
-core_feed_key(ident, mods, is_repeat);
+fcitx::KeySym sym = key.sym();
+if (sym >= FcitxKey_A && sym <= FcitxKey_Z)            // A–Z → a–z
+    sym = lower(sym);
+std::string keyName = fcitx::Key::keySymToString(sym); // "a","q","comma","yen"…
+// → mzkana_engine_key_down/up(engine, keyName, shift)
 ```
 
-`xkbcommon` は fcitx5 が既に持っているので追加依存なし。
+> 注: 設計初稿は `xkb_state_key_get_one_sym_for_level(..., level 0)` による完全な
+> level-0 取得を想定していたが、実装は A–Z の算術小文字化のみ。記号・JIS 固有キーの
+> Shift 変化（数字段の記号等）は現状吸収しきれない（§付録 C / 既知の制限）。
 
 ### 識別子化規則
 
@@ -200,7 +218,12 @@ CapsLock 状態               → settings.caps_lock_behavior に従う
 
 ### キーリピート
 
-XKB はリピート時にも同じ sym を送る。同時/相互シフト判定で誤爆するため、リピート中は pending_keys に積まない。
+OS は物理キー保持中に同じ key-down を連打する（オートリピート）。状態機械は
+押下/解放の離散遷移を前提とするため、保持中キーの再 down は誤爆の原因になる。
+**抑止は Rust core 側で行う**: `process_key_down` 冒頭で、既に `held_keys` にある
+通常キーの down を無視する。BackSpace と Mozc 制御キー（Return/矢印/Henkan 等）は
+`held_keys` に積まないため、それらのリピート（連続削除・候補送り）は有効なまま。
+（設計初稿は C++ 側 `is_repeat` での抑止を想定していたが、実装は core 側に集約。）
 
 ---
 
@@ -208,24 +231,35 @@ XKB はリピート時にも同じ sym を送る。同時/相互シフト判定�
 
 ### 内部状態
 
+実際のフィールド名は `statemachine.rs` に準拠（下記は要点の抜粋）。
+
 ```rust
 struct StateMachine {
-    pending_keys: Vec<(KeyId, Instant)>,
+    layout: Layout,                          // コンパイル済み配列（base_layer/chords/… 別フィールド）
+    pending_keys: Vec<(String, Instant)>,
     tentative_buffer: Vec<TentativeChar>,    // Mozc に送ったが書換可能な文字
-    active_modifiers: BTreeSet<ModifierId>,
-    direct_trigger_active: bool,             // 7 章の漢直トリガー状態
-    mozc_mode: MozcMode,                     // COMPOSITION | CONVERSION
-    chord_timer: Option<Instant>,
-    rules: RuleIndex,                        // prefix trie + chord index
+    modifier_states: Vec<ModifierState>,     // modifier ごとの hold/toggle/oneshot 状態
+    direct_trigger_state: DirectTriggerState,// 7 章の漢直トリガー状態
+    mozc_mode: MozcMode,                     // Composition | Conversion
+    chord_deadline: Option<Instant>,         // tentative_buffer 内の最早 rewrite_deadline
+    held_keys: HashSet<String>,              // 物理押下中の通常キー（相互/同時シフト判定 + リピート抑止）
+    chord_consumed_keys: HashSet<String>,    // 確定済み chord のキー（解放まで再発火を抑止）
 }
 
 struct TentativeChar {
-    kana: String,             // Mozc preedit に送った文字（1 つの kana、ゔ等の合成済み含む）
-    source_keys: Vec<KeyId>,  // どのキー（列）から生成したか
-    sent_at: Instant,
+    kana: String,             // Mozc preedit に送った文字（合成済みかな・複数文字もあり得る）
+    source_keys: Vec<String>, // どのキー（列）から生成したか
     rewrite_deadline: Option<Instant>,  // chord 候補がある場合のみ Some
+    pending_tail: Vec<String>, // 確定後に emit する後続トークン（"、!Enter" 等の末尾）
+    mozc_char_len: usize,      // この kana が Mozc preedit で占める文字数（H1: BS 回数の基準）
+    confirmed: bool,           // source キーのいずれかが解放されたら true（以後 chord 書換対象外）
 }
 ```
+
+> 注: 設計初稿の `sent_at` / `chord_timer` / `rules: RuleIndex` は実装には存在しない。
+> 規則は `Layout` 内の `base_layer` / `prefix_layers` / `postfix_layers` /
+> `modified_layers` / `chords` / `directs` / `aliases` という個別フィールドで保持し、
+> 都度線形マッチする（§3 の統一 `Rule`/`Pattern` 抽象は採用していない。下記参照）。
 
 ### 核心：Speculative execution + BS-rewrite
 
@@ -235,8 +269,9 @@ struct TentativeChar {
 
 ```
 KeyDown(k, t):
-  if is_repeat:
-    return
+  if k が既に held_keys にある（= OS のオートリピート）and k が通常キー:
+    return   # 押下/解放の離散遷移のみを扱う。保持中キーの down 連打は無視
+             # （BackSpace・制御キーは held_keys に積まないのでリピートは有効）
 
   if k は modifier 定義に該当:
     active_modifiers.insert(modifier_id)
@@ -247,31 +282,27 @@ KeyDown(k, t):
     pending_keys と tentative_buffer をクリア
     return
 
-  if mozc_mode == CONVERSION:
-    tentative_buffer.clear()  # 書換機会消失
-    （Mozc は新たな入力で COMPOSITION に戻る）
+  if mozc_mode == CONVERSION and k が Mozc 制御キーでない:
+    # 通常キーは新規合成を開始（書換機会消失、Composition へ戻す）
+    tentative_buffer.clear(); pending_keys.clear(); mozc_mode = Composition
+    # ※ space/Henkan/矢印/Return/Escape 等の制御キーはこの分岐に入らず、
+    #   変換を継続するため後段で Mozc へ送られる（候補送り・確定が効く）
 
+  # 相互シフト（symmetric chord）は held_keys が揃った時点で即発火（後述）
   pending_keys.push((k, t))
-
-  # 候補規則の評価
-  candidates = rules.match(pending_keys, active_modifiers, direct_trigger_active)
-
-  match candidates:
-    [single_complete] if 唯一完全マッチ and 延長可能性なし:
-      → send_resolved(rule)   # 即確定、書換不要
-
-    sequence/chord 候補あり:
-      → speculative_emit(k)   # 即時 speculative 送信
+  speculative_emit(k)   # base 割当があれば即 speculative 送信、なければ C4 経路へ
 
 KeyUp(k, t):
+  held_keys.remove(k); chord_consumed_keys.remove(k)
+  # このキーを source に持つ tentative char を confirmed=true にマーク
+  #   → 以後の chord 書換から保護（あかが 問題の核心）
   if k は modifier/direct_trigger:
-    active_modifiers.remove or direct_trigger_active 更新
+    その tap_action を評価（hold 解除 / 単独タップ出力）
     return
-  # chord 解決チェック（後述）
 
-ChordTimer 発火:
-  tentative_buffer 内、deadline 超過の chord 機会を確定
-  （該当の TentativeChar の rewrite_deadline を None に変更）
+tick(now):   # fcitx5 の EventSourceTime（約10ms 周期）から呼ばれる
+  chord_deadline 超過分の tentative を確定し pending_tail を emit
+  window 超過の pending_keys を除去（chord_window の時間強制, C1）
 ```
 
 ### speculative_emit
@@ -289,47 +320,55 @@ speculative_emit(k):
   # かなモード
   base = base_layer.lookup(k, active_modifiers)
   if base.is_none():
-    # base 層に割当なし（pure trigger key 等）→ tentative 送信しない
+    # base 層に割当なし。chord 候補もなければ pending から外し、
+    # 合成状態（tentative 非空 or Conversion）に応じて経路分岐（C4）:
+    #   合成中 + Mozc 制御キー(space/Return/矢印/Henkan 等) → SendFunctionKey で Mozc へ
+    #   合成中 + 非制御キー → SubmitThenPassthrough（preedit を確定→生キー素通し）
+    #   非合成 → Passthrough（アプリへ素通し）
     return
 
-  send_to_mozc(KeyString(base.kana))
+  send_to_mozc(KeyString(base.kana))   # AS_IS で preedit へ挿入
   tentative_buffer.push(TentativeChar {
     kana: base.kana,
     source_keys: vec![k],
-    sent_at: t,
-    rewrite_deadline: 
+    mozc_char_len: base.kana.chars().count(),
+    confirmed: false,
+    rewrite_deadline:
       if chord 候補あり: Some(t + chord_window_ms)
       else if sequence 候補あり: None  # sequence は永久書換可能
       else: 即時 None（書換機会なし、確定済み）
   })
-  
-  # sequence 規則の継続候補があれば pending_keys に保持
-  # chord 規則の継続候補があれば pending_keys に保持
-  # 何も継続候補がなければ pending_keys.clear()
+
+  # sequence/chord の継続候補があれば pending_keys に保持、なければ clear
 ```
 
 ### 規則マッチ時の BS-rewrite
 
 ```
 on_rule_match(rule):
-  # tentative_buffer のうち rule.source_keys に該当する文字を取消
-  affected = tentative_buffer の末尾から source_keys 集合を含む TentativeChar 群
-  
-  for _ in affected:
-    send_to_mozc(KeyCode(BackSpace))
-  tentative_buffer.truncate(affected.len() 分前)
-  
+  # tentative_buffer 末尾から、書換対象の TentativeChar 群を選ぶ。
+  # 条件: !confirmed かつ source_keys が全て rule のキー集合に含まれる（部分集合）。
+  #   - confirmed（source キー解放済み）の文字は確定とみなし絶対に巻き込まない。
+  #     例: あ(j) か(f) を打った後に が(f+j) を打つと、確定済み「あ」「か」の
+  #         source [j] [f] は {f,j} の部分集合だが confirmed なので除外される。
+  affected = tentative_buffer.rev().take_while(|tc|
+               !tc.confirmed && tc.source_keys ⊆ rule.keys)
+
+  # BackSpace は「対象文字の mozc_char_len の合計」回送る（H1: 1 TentativeChar が
+  # 複数文字になり得るため、文字数ベースで Mozc preedit と同期させる）。
+  send_to_mozc(BackSpace × Σ affected.mozc_char_len)
+  tentative_buffer.truncate(affected を除いた残り)
+
   # rule の出力を新たに送信
   send_to_mozc(KeyString(rule.output))
-  tentative_buffer.push(TentativeChar {
-    kana: rule.output,
-    source_keys: rule.source_keys,
-    rewrite_deadline: 
-      これ以上書換可能な規則があれば Some、なければ None
-  })
-  
+  tentative_buffer.push(TentativeChar { kana: rule.output, source_keys: rule.keys, … })
+
   pending_keys.clear()
 ```
+
+> **H1 不変条件**: BackSpace 回数は TentativeChar 数ではなく Mozc preedit 文字数。
+> 削除＋BackSpace 生成＋truncate は `pop_tentative(n)` に集約され、全書換経路
+> （chord / prefix / 後置 / kanchoku 遷移 / 手動 BS）がこれを共有する。
 
 ### chord_window_ms の意味
 
@@ -371,10 +410,17 @@ sequence 候補がある間、`rewrite_deadline = None` で永久書換可能。
 ```
 KeyDown(BackSpace):
   if tentative_buffer 非空:
-    tentative_buffer.pop()
-    pending_keys.clear()  # 対応する pending もクリア
-  send_to_mozc(KeyCode(BackSpace))  # Mozc 側 preedit からも 1 文字消える
+    末尾の TentativeChar を 1 件 pop
+    その mozc_char_len の回数だけ BackSpace を Mozc へ送る（複数文字かな対応）
+    pending_keys.clear()
+  else if pending_keys 非空:
+    pending_keys.clear()  # 未完成 prefix/sequence を破棄（外部 BS は送らない）
+  else:
+    BackSpace をアプリへ素通し（内部に何も無い）
 ```
+
+BackSpace は `held_keys` に積まないため、押しっぱなしのオートリピートによる
+連続削除はそのまま機能する（KeyDown 冒頭のリピート抑止対象外）。
 
 ### Mozc CONVERSION 遷移
 
@@ -412,7 +458,13 @@ speculative model では自動的に処理される：典型的なタイプミ�
 
 `interrupt` は反応が良いが、単独 tap は他キー無しで離す必要あり。`timeout` は誤爆少ないが反応が鈍い。設定で選択可能。
 
-Modifier 系の出力は最初から最終層の kana を送るため、書換は発生しない。
+Modifier 系の出力（modified layer の kana）は最初から最終層の kana を送るため、書換は発生しない。
+
+センターシフトキー（薙刀式の `space` 等、`tap_action = "send_key"`/passthrough）の
+**単独タップ**は、その物理キーが Mozc 制御キー（space/Return 等）なら合成中・非合成を
+問わず Mozc へ送る（`SendFunctionKey`）。これにより空 preedit 時の space は全角「　」を
+commit、合成中の space は変換を開始する。非制御キーの passthrough modifier はそのまま
+アプリへ素通しする。
 
 ### 漢直 sequence の例外
 
@@ -627,54 +679,81 @@ mozc_server に **protobuf over Unix Domain Socket** で直接 IPC。fcitx5-mozc
 
 ### ビルド時の処理
 
-`prost-build` で `mozc/protocol/commands.proto` を取り込み、Rust 型を生成。
+公式 `commands.proto`（および推移的 import: `config.proto` / `candidate_window.proto`
+/ `engine_builder.proto` / `user_dictionary_storage.proto`）を
+`crates/mzkana-core/protocol/` に **vendor**（リポジトリにコミット）し、
+`prost-build` + `protoc-bin-vendored` でビルド時に Rust 型を生成する
+（システム protoc 不要・ネットワーク不要、`crates/mzkana-core/build.rs`）。
 
 ### 接続先
 
-```
-~/.mozc/session.sock
-```
+Linux 抽象名前空間ソケット（`/proc/net/unix` から
+`@…​.mozc.….session` を自動検出）を優先。検出できない場合のフォールバックとして
+`~/.mozc/session.sock`（filesystem socket）を使う。認証はカーネルの SO_PEERCRED
+による UID 照合で、鍵交換は行わない。未起動なら既知パスから mozc_server を自動起動する。
+
+### スレッドモデル（同期 IPC + ワーカースレッド）
+
+`MozcClient` は同期ブロッキングの `std::os::unix::net::UnixStream` を用いる
+（tokio 等の非同期ランタイムは使わない）。fcitx5 のメインイベントループを塞がない
+よう、IPC は専用ワーカースレッド `MozcWorker`（`mozc/worker.rs`）上で実行する。
+
+- engine ↔ worker は `std::sync::mpsc` チャネルで通信。
+- 1 打鍵分の操作（BS-rewrite の BackSpace×N + SendKana 等）は `Op` 列として
+  **1 バッチ**にまとめ、チャネル往復とタイムアウト予算を 1 回に集約する。
+- `recv_timeout` による **150ms ハードタイムアウト**。超過時はワーカーを
+  sticky-dead 化して破棄し、当該キーは未確定のまま素通し、次イベントで再接続する
+  （UI は決して固まらない）。ソケット自体の read/write タイムアウトは 1 秒。
 
 ### キー送信の方式
 
-ローマ字としてではなく、**確定したかな文字列を直接送る**：
+ローマ字としてではなく、**確定したかな文字列を直接送る**。`input_style` は
+**`AS_IS`**（値 1）を使う。Mozc 内部の `InsertCharacterPreedit()` が呼ばれ、
+かな文字列がローマ字変換テーブルを介さず composition（preedit）へ直接挿入される。
 
 ```rust
-let key_event = KeyEvent {
-    key_code: None,
+// proto.rs: input_send_kana
+let key = KeyEvent {
     key_string: Some("か".to_string()),
-    input_style: InputStyle::DIRECT_INPUT,
+    input_style: Some(input_style::AS_IS), // = 1
     ..Default::default()
 };
-let output = mozc_client.send_key(key_event).await?;
 ```
 
-Mozc 側からはローマ字入力かかな直接入力かを区別する必要がなく、変換品質はそのまま得られる。
+`FOLLOW_MODE`(0) はローマ字テーブル経由となりかな文字列では出力されず、
+`DIRECT_INPUT`(2) は preedit を介さず result へ直接 commit してしまうため、
+いずれも不適。これは実 mozc_server で検証済み。
+
+### セッション初期化（HIRAGANA モード）
+
+CREATE_SESSION 直後のセッションは IME-OFF（Direct）状態で、この状態では
+`key_string` が composer に入らない。`create_session` は session_id 取得直後に
+**TURN_ON_IME**（`SessionCommand` type=22、`composition_mode = HIRAGANA`）を送って
+IME を起動しつつ合成モードを設定する。`SWITCH_COMPOSITION_MODE` 単独では IME-OFF
+から抜けられないことを実機で確認済みのため、TURN_ON_IME を用いる。
 
 ### BS-rewrite プロトコル
 
-5 章の speculative execution が要求する書換動作は、Mozc IPC では「BackSpace + 新 kana 送信」のシーケンスで実現する。
+5 章の speculative execution が要求する書換動作は、Mozc IPC では
+「BackSpace + 新 kana 送信」のシーケンスで実現する。BackSpace は特殊キー
+（`SpecialKey::BACKSPACE`、`input_style = FOLLOW_MODE`）として送る。
 
 ```rust
-fn rewrite_tentative(&mut self, removed: usize, new_kana: &str) {
-    // 1. 取消したい tentative 文字数分だけ BS を送る
-    for _ in 0..removed {
-        mozc_client.send_key(KeyEvent {
-            key_code: Some(KeyCode::Backspace),
-            input_style: InputStyle::DIRECT_INPUT,
-            ..Default::default()
-        }).await?;
+fn rewrite_tentative(&self, removed_chars: usize, new_kana: &str) {
+    // 1. 取消したい preedit 文字数分だけ BackSpace を送る
+    for _ in 0..removed_chars {
+        mozc.send_backspace()?;       // SpecialKey::BACKSPACE
     }
     // 2. 新しい kana を送る
-    mozc_client.send_key(KeyEvent {
-        key_string: Some(new_kana.to_string()),
-        input_style: InputStyle::DIRECT_INPUT,
-        ..Default::default()
-    }).await?;
+    mozc.send_kana(new_kana)?;        // key_string + AS_IS
 }
 ```
 
-DIRECT_INPUT モードでは Mozc 自身は pending を持たないため、送信した key_string は即座に Mozc preedit の末尾に追加され、BackSpace は末尾の 1 文字を削除する。我々の `tentative_buffer` と Mozc preedit が一対一で対応する単純な不変条件が保てる。
+AS_IS で挿入された kana は Mozc preedit の末尾に追加され、BackSpace は末尾の
+1 文字を削除する。我々の `tentative_buffer` と Mozc preedit が一対一で対応する
+不変条件が保てる。ただし 1 つの `TentativeChar` が複数文字（"きゃ"・合成かな・
+alias 展開）になり得るため、BackSpace 回数は TentativeChar 数ではなく
+**Mozc preedit 文字数**（`TentativeChar.mozc_char_len` の合計）で数える（5 章 H1）。
 
 ### preedit / commit 同期
 
@@ -689,14 +768,18 @@ Mozc.Output.mode       → 状態機械の mozc_mode を更新
 
 ユーザが Space 等を押して変換候補を開いた時、Mozc は `Output.mode = CONVERSION` を返す。状態機械側は以下を行う：
 
+FFI 層（engine.rs）は Mozc Output の preedit highlight 等から CONVERSION 遷移を
+判定し、`StateMachine::notify_mozc_conversion()` を呼ぶ。状態機械側の処理:
+
 ```rust
-on_mozc_output(output: Output) {
-    if output.mode == CONVERSION && self.mozc_mode != CONVERSION {
-        self.tentative_buffer.clear();  // 書換機会消失
+fn notify_mozc_conversion(&mut self) {
+    if self.mozc_mode != Conversion {
+        self.tentative_buffer.clear();   // 書換機会消失
         self.pending_keys.clear();
-        // 以降の文字キー入力は新規 sequence として処理
+        self.held_keys.clear();          // 新入力サイクル: 滞留キー/誤リピート判定を防止
+        self.chord_consumed_keys.clear();
     }
-    self.mozc_mode = output.mode;
+    self.mozc_mode = Conversion;
 }
 ```
 
@@ -706,20 +789,14 @@ CONVERSION 中は新たな kana キー入力で Mozc が自動的に COMPOSITION
 
 ```rust
 fn handle_direct_output(kanji: &str) {
-    // 1. tentative_buffer が残っていれば全て BS で消す
-    for _ in 0..self.tentative_buffer.len() {
-        mozc_client.send_key(BackSpace).await?;
-    }
-    self.tentative_buffer.clear();
-
-    // 2. Mozc preedit を確定（残っていれば変換した上で commit される）
-    mozc_client.submit().await?;
-
-    // 3. 漢直結果を直接 commit
-    fcitx5.commit_text(kanji);
-
-    // 4. 状態リセット
-    self.pending_keys.clear();
+    // 1. tentative_buffer が残っていれば全て BS で消す（preedit 文字数ベース）
+    let bs = self.flush_tentative();   // tentative_buffer をクリアし BackSpace 群を返す
+    // 2. Mozc preedit を確定（残っていれば変換した上で commit される）→ submit
+    // 3. 漢直結果を直接 commit（fcitx5 の commitString）
+    // 4. 状態リセット（pending_keys クリア）
+    //
+    // 実装では state machine が SubmitAndCommit(kanji) / CommitDirect(kanji) 等の
+    // OutputAction を返し、FFI 層（engine.rs）がワーカー経由で submit→commit を行う。
 }
 ```
 
@@ -823,6 +900,14 @@ cross-context（activation_scope や layer が違う）は競合ではない
 
 設定読込時に静的解析。`mzkana-cli validate <layout.toml>` で事前チェック可能。
 
+> **実装メモ**: 本章は競合検出の完全な設計（context / activation_scope モデル）を
+> 示す。実装の `config::analyze_conflicts` は現状その部分集合をカバーする:
+> ① 多重ロールキー（同一キーが modifier / direct trigger / prefix / postfix を兼ねる）、
+> ② base 層を覆う特殊キー、③ 出力の異なる重複 chord、④ modifier に飲まれる chord メンバ。
+> direct の完全重複（出力相違）は読込時にハード error。これらは `load_layout` が
+> tracing 警告として出力し、`mzkana-cli validate` が件数と内容を表示する。
+> fcitx5 通知（notification）連携と activation_scope ベースの厳密判定は未実装。
+
 ### 通知方法
 
 ```
@@ -895,7 +980,9 @@ fcitx5 の Input Panel は単一フローティングウィンドウに複数領
 
 `InputPanel::setPreedit()` で渡したテキストはこの「Preedit 領域」に表示され、Mozc から候補が返ってくればその下に並ぶ。
 
-### 4 段階の戦略
+### 4 段階の戦略（概念）と実装
+
+概念上は次の 4 戦略を想定する。
 
 ```rust
 enum PreeditStrategy {
@@ -904,14 +991,19 @@ enum PreeditStrategy {
     BufferOnly,           // パネル描画も不可、内部バッファのみ、確定時に commit
     PassthroughImmediate, // sensitive、addon バイパス
 }
-
-fn select_strategy(caps: CapabilityFlags) -> PreeditStrategy {
-    if caps.contains(PasswordOrSensitive)  { return PassthroughImmediate; }
-    if caps.contains(Preedit)              { return ClientInline; }
-    if fcitx5_panel_available()            { return PanelPreedit; }
-    BufferOnly
-}
 ```
+
+> **実装メモ**: C++ 側に上記 enum は無く、`applyResult`（`engine.cpp`）が
+> capability と `preedit_fallback` 設定で**インラインに分岐**する:
+> - `CapabilityFlag::Preedit` 対応クライアント → `setClientPreedit`（インライン）。
+>   併せて panel にもミラーする。
+> - 非対応 かつ `preedit_fallback = "buffer"` → client/panel とも空（非表示）。
+> - それ以外（client/panel/auto）→ フローティングパネルに表示。
+>
+> 実効的に ClientInline / PanelPreedit / BufferOnly を区別する。`PassthroughImmediate`
+> は別経路で実装: パスワード/sensitive 欄では `sensitive_field_behavior` に従い、
+> `passthrough` なら IME 処理自体をスキップ、`buffer` なら処理するが preedit は出さない
+> （後述「sensitive フィールドの扱い」）。"client" と "auto" は現状パネルと同等に扱う。
 
 ### 各戦略の動作
 
@@ -998,10 +1090,10 @@ sensitive_field_behavior = "passthrough"
 |---|---|---|---|
 | `chord_window_ms` | integer | 50 | 同時シフトの BS-rewrite 受付窓（speculative 送信後の書換可能時間） |
 | `mutual_window_ms` | integer | 80 | 相互シフトの BS-rewrite 受付窓 |
-| `caps_lock_behavior` | enum | `"shift"` | `"shift"` / `"ignore"` / `"passthrough"` |
-| `on_focus_change` | enum | `"preserve"` | `"preserve"` / `"reset"` |
-| `roll_over` | bool | `true` | roll-over 許容 |
-| `preedit_fallback` | enum | `"panel"` | `"client"` / `"panel"` / `"buffer"` / `"auto"` |
+| `caps_lock_behavior` | enum | `"shift"` | `"shift"` / `"ignore"` / `"passthrough"`（※現状未強制：C++ が常に level-0 小文字化。予約） |
+| `on_focus_change` | enum | `"preserve"` | `"preserve"` / `"reset"`（reset 時は focus-out で revert + preedit クリア） |
+| `roll_over` | bool | `true` | roll-over 許容（※現状は別モードとして強制せず。予約） |
+| `preedit_fallback` | enum | `"panel"` | `"client"` / `"panel"` / `"buffer"` / `"auto"`（buffer のみ特別扱い、他はパネル相当） |
 | `sensitive_field_behavior` | enum | `"passthrough"` | `"passthrough"` / `"buffer"` |
 
 ### `[[modifier]]`
@@ -1062,26 +1154,26 @@ mzkana/
 ├── crates/
 │   ├── mzkana-core/             # 状態機械 + 設定 + IPC（pure Rust）
 │   │   ├── src/
-│   │   │   ├── config.rs         # TOML パース + JSON Schema 生成
-│   │   │   ├── statemachine.rs   # Pattern matching engine
+│   │   │   ├── config.rs         # TOML パース + JSON Schema 派生 + 競合解析
+│   │   │   ├── statemachine.rs   # シフト方式の状態機械 + speculative/BS-rewrite
+│   │   │   ├── error.rs
 │   │   │   ├── mozc/
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── proto.rs      # prost 生成
-│   │   │   │   └── client.rs     # UDS IPC
-│   │   │   ├── reload.rs         # notify によるホットリロード
+│   │   │   │   ├── proto.rs      # prost 生成型のラッパ + エンコード/デコード
+│   │   │   │   ├── client.rs     # 同期 UDS IPC クライアント
+│   │   │   │   └── worker.rs     # IPC 専用ワーカースレッド（150ms タイムアウト）
+│   │   │   ├── tests.rs
 │   │   │   └── lib.rs
-│   │   ├── build.rs              # protobuf + JSON Schema 自動生成
+│   │   ├── protocol/             # vendor した Mozc *.proto（commands ほか）
+│   │   ├── build.rs              # prost-build + protoc-bin-vendored で proto 生成
 │   │   └── Cargo.toml
-│   ├── mzkana-ffi/              # C ABI export（cbindgen）
-│   ├── mzkana-cli/              # 設定検証 + dry-run テスト
-│   └── mzkana-config-gui/       # egui ベースの設定 GUI
+│   ├── mzkana-ffi/              # C ABI export（cbindgen）+ engine/ホットリロード
+│   │   ├── src/{lib.rs, engine.rs}
+│   │   └── include/mzkana.h      # cbindgen 生成ヘッダ
+│   └── mzkana-cli/              # 設定検証（validate）+ dry-run（run/mozc-run）+ schema 出力
 ├── fcitx5-addon/                 # C++ 薄シム（CMake）
-│   ├── src/
-│   │   ├── engine.cpp            # FcitxInputMethodEngineV2 impl
-│   │   └── main.cpp              # addon entry
+│   ├── src/{engine.cpp, engine.h}
 │   └── CMakeLists.txt
-├── schemas/
-│   └── layout.schema.json        # build.rs で自動生成
 ├── layouts/                      # 同梱配列
 │   ├── tsuki-2-263.toml
 │   ├── shin-geta.toml
@@ -1090,58 +1182,66 @@ mzkana/
 └── Cargo.toml
 ```
 
+> 注: ホットリロードは独立した `reload.rs` ではなく `mzkana-ffi/src/engine.rs` 内
+> （`notify` watcher）。JSON Schema は build.rs ではなく `mzkana-cli schema`
+> サブコマンドで出力（`schemas/` ディレクトリは持たない）。設定 GUI
+> （`mzkana-config-gui` / egui）は未実装。
+
 ### 主要依存クレート
 
 | crate | 用途 |
 |---|---|
 | `serde` + `toml` | 設定パース |
-| `schemars` | JSON Schema 生成 |
-| `prost` + `prost-build` | Mozc protobuf |
-| `tokio` | 非同期 UDS IPC |
-| `notify` | ファイル監視 |
+| `schemars` | JSON Schema 派生 |
+| `prost` + `prost-build` + `protoc-bin-vendored` | Mozc protobuf（ビルド時生成・自己完結） |
+| `phf` | キー集合の静的ルックアップ |
+| `notify` | ファイル監視（ホットリロード） |
 | `tracing` | 構造化ログ |
 | `cbindgen` | C ヘッダ生成 |
-| `eframe` + `egui` | GUI バイナリ |
+
+> 注: IPC は同期実装でワーカースレッド分離のため `tokio` は不使用。GUI 未実装のため
+> `eframe`/`egui` も不使用（設計初稿の記載を削除）。
 
 ---
 
 ## 14. 実装フェーズ
 
 ```
-Phase 1: mzkana-core 単体
-  ├ TOML パース + JSON Schema 生成
+Phase 1: mzkana-core 単体  … 完了
+  ├ TOML パース + JSON Schema 派生（cli schema）
   ├ State machine（全シフト方式、speculative execution + BS-rewrite）
-  │   ├ tentative_buffer の管理
-  │   ├ pending_keys と規則マッチング
+  │   ├ tentative_buffer の管理（mozc_char_len / confirmed フラグ）
+  │   ├ pending_keys / held_keys と規則マッチング、オートリピート抑止
   │   └ CONVERSION モード遷移ハンドラ
-  ├ mzkana-cli で synthetic key events を流して検証
-  │   └ 「キー列 → 出力イベント列（key_string / BackSpace の混在）」を検証
-  └ 既存配列（月、新下駄、薙刀式、T-code）の TOML を書いて回帰テスト
+  ├ mzkana-cli で synthetic key events を流して検証（run）
+  └ 既存配列（月、新下駄、薙刀式、T-code）の TOML で回帰テスト
 
-Phase 2: Mozc 接続
-  ├ prost-build で commands.proto 取り込み
-  ├ UDS クライアント
-  ├ BS-rewrite プロトコル実装（BackSpace + 新 kana 連続送信）
-  └ cli で「キー列入力 → mozc 経由 preedit/result」を確認、書換動作も検証
+Phase 2: Mozc 接続  … 完了
+  ├ vendor した commands.proto を prost-build で取り込み（protoc 同梱）
+  ├ 同期 UDS クライアント + ワーカースレッド（150ms タイムアウト）
+  ├ TURN_ON_IME による HIRAGANA 初期化、AS_IS でのかな送信
+  ├ BS-rewrite プロトコル（BackSpace×文字数 + 新 kana）
+  └ cli mozc-run で preedit/result と書換動作を確認
 
-Phase 3: fcitx5 アドオン化
+Phase 3: fcitx5 アドオン化  … 完了
   ├ C++ シム + cbindgen
   ├ KeyEvent → core 呼び出し → preedit/commit 同期
-  ├ Preedit 表示戦略（ClientInline/PanelPreedit/BufferOnly）の切替
-  └ ホットリロード（notify）
+  ├ tick の EventSourceTime タイマ配線（chord 確定・複合出力末尾）
+  ├ Preedit 表示分岐（インライン / パネル / buffer）+ sensitive 欄処理
+  └ ホットリロード（notify、engine.rs 内）
 
-Phase 4: 設定 GUI
-  └ egui で配列の視覚編集 + プレビュー
+Phase 4: 設定 GUI  … 未着手
+  └ 配列の視覚編集 + プレビュー（クレート未作成）
 ```
 
-### 各フェーズの完了条件
+### 各フェーズの状況
 
-| Phase | 完了条件 |
-|---|---|
-| 1 | 4 種類の既存配列が cli で正しいかな列を出力する |
-| 2 | cli から実際の Mozc サーバに接続して preedit/result が得られる |
-| 3 | fcitx5 上で実用入力ができ、設定リロードが動く |
-| 4 | GUI で配列の編集・保存・即時プレビューができる |
+| Phase | 完了条件 | 状況 |
+|---|---|---|
+| 1 | 4 種類の既存配列が cli で正しいかな列を出力する | ✅ 完了 |
+| 2 | cli から実際の Mozc サーバに接続して preedit/result が得られる | ✅ 完了 |
+| 3 | fcitx5 上で実用入力ができ、設定リロードが動く | ✅ 完了（実機動作確認済み） |
+| 4 | GUI で配列の編集・保存・即時プレビューができる | 未着手 |
 
 ---
 
