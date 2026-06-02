@@ -45,8 +45,6 @@ pub mod cmd {
 pub mod session_cmd {
     pub const REVERT: i32 = 1;
     pub const SUBMIT: i32 = 2;
-    #[allow(dead_code)]
-    pub const SWITCH_COMPOSITION_MODE: i32 = 5;
     pub const TURN_ON_IME: i32 = 22;
 }
 
@@ -123,25 +121,12 @@ pub fn input_create_session() -> EncodedInput {
     encode_input(Input { r#type: cmd::CREATE_SESSION, ..Default::default() })
 }
 
-/// Build a SEND_COMMAND / SWITCH_COMPOSITION_MODE input.
-///
-/// Only works when the IME is already ON (use `input_turn_on_ime` to activate).
-/// `mode` should be a `composition_mode` constant (e.g. `composition_mode::HIRAGANA`).
-#[allow(dead_code)]
-pub fn input_switch_composition_mode(session_id: u64, mode: i32) -> EncodedInput {
-    let command = SessionCommand {
-        r#type: session_cmd::SWITCH_COMPOSITION_MODE,
-        composition_mode: Some(mode),
-        ..Default::default()
-    };
-    encode_input(Input { r#type: cmd::SEND_COMMAND, id: Some(session_id), command: Some(command), ..Default::default() })
-}
-
 /// Build a SEND_COMMAND / TURN_ON_IME input.
 ///
 /// TURN_ON_IME transitions the session from IME-OFF (Direct) to the specified
 /// composition mode.  New sessions start IME-OFF; this call is required before
-/// kana input will be consumed by Mozc.
+/// kana input will be consumed by Mozc. (SWITCH_COMPOSITION_MODE alone does NOT
+/// leave IME-OFF — verified on a live mozc_server — so TURN_ON_IME is used here.)
 pub fn input_turn_on_ime(session_id: u64, mode: i32) -> EncodedInput {
     let command = SessionCommand {
         r#type: session_cmd::TURN_ON_IME,

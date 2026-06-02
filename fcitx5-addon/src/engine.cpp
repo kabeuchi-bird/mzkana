@@ -126,7 +126,7 @@ void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
 
 void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry & /*entry*/,
                                     fcitx::InputContextEvent &event) {
-    // H3: honor on_focus_change (preserve / commit / clear) on focus loss.
+    // H3: honor on_focus_change (preserve / reset) on focus loss.
     if (engine_) {
         mzkana_engine_focus_out(engine_);
     }

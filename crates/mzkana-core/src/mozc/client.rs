@@ -425,15 +425,7 @@ impl MozcClient {
 
     pub fn send_kana(&self, kana: &str) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
-        let result = self.dispatch(&input_send_kana(sid, kana));
-        match &result {
-            Ok(out) => eprintln!(
-                "[mzkana] send_kana({kana:?}) → consumed={} preedit={:?} result={:?} mode={}",
-                out.consumed, out.preedit, out.result, out.mode
-            ),
-            Err(e) => eprintln!("[mzkana] send_kana({kana:?}) FAILED: {e}"),
-        }
-        result
+        self.dispatch(&input_send_kana(sid, kana))
     }
 
     pub fn send_backspace(&self) -> Result<MozcOutput, MozcError> {
