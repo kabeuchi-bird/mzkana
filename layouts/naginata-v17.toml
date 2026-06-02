@@ -53,23 +53,18 @@ grid     = """
 3 ＿   ほ   ひ   を ku_ret ぬ   お to_ret む   わ   れ
 """
 
-# ── 相互シフト（濁音・拗音など） ──────────────────────────────────────────────
+# ── 相互シフト（濁音・拗音・半濁音） ────────────────────────────────────────
+# 出典: https://github.com/kabeuchi-bird/nagi/blob/main/nagi.kbd の defchords nagi
+#       （130 行以降の 2 キー同時押し定義）。ローマ字マクロをかなへ変換して転記。
+# 注: 拗音（きゃ 等）は 2 文字出力。BS-rewrite が Mozc preedit 文字数で書き換える
+#     ことの実機検証用に重要。nagi.kbd の 3 キー以上の同時押し（濁拗音・外来音・
+#     ヴァ行・小書き合成）と編集レイヤ（d f 等）は、現状の mutual chord 機構が
+#     2 キー prefix と衝突するため未収録（将来対応）。
 
+# 濁音
 [[chord]]
-keys      = ["f", "j"]
-output    = "が"
-symmetric = true
-window_ms = 80
-
-[[chord]]
-keys      = ["r", "j"]
-output    = "じ"
-symmetric = true
-window_ms = 80
-
-[[chord]]
-keys      = ["v", "j"]
-output    = "ご"
+keys      = ["w", "j"]
+output    = "ぎ"
 symmetric = true
 window_ms = 80
 
@@ -80,13 +75,269 @@ symmetric = true
 window_ms = 80
 
 [[chord]]
+keys      = ["r", "j"]
+output    = "じ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["u", "f"]
+output    = "ざ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["o", "f"]
+output    = "ず"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["p", "f"]
+output    = "べ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["a", "j"]
+output    = "ぜ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["s", "j"]
+output    = "げ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
 keys      = ["d", "j"]
 output    = "ど"
 symmetric = true
 window_ms = 80
 
 [[chord]]
+keys      = ["f", "j"]
+output    = "が"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["g", "j"]
+output    = "ぢ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["h", "f"]
+output    = "ぐ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["l", "f"]
+output    = "づ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["semicolon", "f"]
+output    = "ぶ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["z", "j"]
+output    = "ぼ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["x", "j"]
+output    = "び"
+symmetric = true
+window_ms = 80
+
+[[chord]]
 keys      = ["c", "j"]
 output    = "ば"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["v", "j"]
+output    = "ご"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["b", "j"]
+output    = "ぞ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["n", "f"]
+output    = "だ"
+symmetric = true
+window_ms = 80
+
+# や拗音（2 文字出力）
+[[chord]]
+keys      = ["w", "h"]
+output    = "きゃ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["e", "h"]
+output    = "りゃ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["r", "h"]
+output    = "しゃ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["s", "h"]
+output    = "みゃ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["d", "h"]
+output    = "にゃ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["g", "h"]
+output    = "ちゃ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["x", "h"]
+output    = "ひゃ"
+symmetric = true
+window_ms = 80
+
+# ゆ拗音（2 文字出力）
+[[chord]]
+keys      = ["w", "p"]
+output    = "きゅ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["e", "p"]
+output    = "りゅ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["r", "p"]
+output    = "しゅ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["s", "p"]
+output    = "みゅ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["d", "p"]
+output    = "にゅ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["g", "p"]
+output    = "ちゅ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["x", "p"]
+output    = "ひゅ"
+symmetric = true
+window_ms = 80
+
+# よ拗音（2 文字出力）
+[[chord]]
+keys      = ["w", "i"]
+output    = "きょ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["e", "i"]
+output    = "りょ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["r", "i"]
+output    = "しょ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["s", "i"]
+output    = "みょ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["d", "i"]
+output    = "にょ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["g", "i"]
+output    = "ちょ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["x", "i"]
+output    = "ひょ"
+symmetric = true
+window_ms = 80
+
+# パ行（半濁音）
+[[chord]]
+keys      = ["z", "m"]
+output    = "ぽ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["x", "m"]
+output    = "ぴ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["c", "m"]
+output    = "ぱ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["p", "v"]
+output    = "ぺ"
+symmetric = true
+window_ms = 80
+
+[[chord]]
+keys      = ["semicolon", "v"]
+output    = "ぷ"
 symmetric = true
 window_ms = 80

@@ -421,6 +421,84 @@ fn mutual_chord_after_singles_sharing_keys() {
     assert_eq!(m.tentative_kana_string(), "あかが", "{a_ga:?}");
 }
 
+// ── 同時シフト 2 文字（拗音）: naginata-v17 の実配列で検証 ──────────────────────
+
+#[test]
+fn yoon_chord_emits_two_chars_with_one_backspace() {
+    // きゃ = w+h（w=き base, h=く base, [w,h] symmetric → きゃ）。
+    // w で投機「き」(1 文字)、h で chord 発火。H1: 書き換えは preedit 文字数ベースなので
+    // BackSpace は「き」1 文字分の 1 回のみ、出力は 2 文字「きゃ」。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    let a1 = m.process(InputEvent::down("w"), now);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())), "{a1:?}");
+    let a2 = m.process(InputEvent::down("h"), now);
+    let bs = a2.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 1, "speculative き(1 char) must be removed with exactly 1 BackSpace: {a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("きゃ".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+}
+
+#[test]
+fn consecutive_yoon_chords_keep_committed_chars() {
+    // 拗音（2 文字）を 2 連続。前の拗音は key-up で confirmed になり、次の chord に
+    // 巻き込まれない。きゃ(w+h) → きゅ(w+p)。各 chord の BackSpace は直前の投機 1 文字分のみ。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+
+    m.process(InputEvent::down("w"), now);
+    m.process(InputEvent::down("h"), now);
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+
+    let a1 = m.process(InputEvent::down("w"), now); // 次の き 投機
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())), "{a1:?}");
+    let a2 = m.process(InputEvent::down("p"), now); // きゅ chord
+    let bs = a2.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 1, "only the new speculative き should be backspaced, not committed きゃ: {a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("きゅ".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "きゃきゅ");
+}
+
+#[test]
+fn yoon_chord_after_single_sharing_key() {
+    // 単打かな + キーを共有する 2 文字拗音 chord。し=r(base), しゃ=r+h。
+    // し を打って確定（r key-up）後、しゃ(r+h) を打つと、確定済み「し」は巻き込まれず
+    // 「ししゃ」になる（あかが と同型を 2 文字 chord で検証）。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+
+    m.process(InputEvent::down("r"), now); // し
+    m.process(InputEvent::up("r"), now);
+    assert_eq!(m.tentative_kana_string(), "し");
+
+    m.process(InputEvent::down("r"), now); // 次の し 投機
+    let a = m.process(InputEvent::down("h"), now); // しゃ chord
+    assert!(a.contains(&OutputAction::SendKana("しゃ".to_string())), "{a:?}");
+    // 直前の投機 し(1 文字)のみ BackSpace。確定済みの先頭「し」は残る。
+    let bs = a.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 1, "committed first し must survive; only speculative し removed: {a:?}");
+    assert_eq!(m.tentative_kana_string(), "ししゃ");
+}
+
+#[test]
+fn yoon_chord_backspace_removes_both_chars() {
+    // 2 文字拗音を打った後の手動 BackSpace は preedit 2 文字分（H1）を消す。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("w"), now);
+    m.process(InputEvent::down("h"), now); // きゃ
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+
+    let bs = m.process(InputEvent::down("BackSpace"), now);
+    let n = bs.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(n, 2, "deleting a 2-char yoon must emit 2 BackSpaces: {bs:?}");
+    assert_eq!(m.tentative_kana_string(), "");
+}
+
 #[test]
 fn mutual_chord_no_timeout_after_window() {
     // symmetric=true chord fires regardless of timing — even well after chord_window_ms.
