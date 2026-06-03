@@ -583,6 +583,71 @@ fn center_shift_modifier_layer() {
     assert!(a.contains(&OutputAction::SendKana("め".to_string())));
 }
 
+#[test]
+fn modified_layer_resolves_alias() {
+    // Regression: a modified (center-shift) layer cell that names an alias must be
+    // expanded like the base layer — not sent to Mozc verbatim. naginata's
+    // center_shift 'v' = ku_ret = "、 !Return".
+    let mut m = sm(NAGINATA);
+    let now = Instant::now();
+    m.process(InputEvent::down("space"), now); // hold center modifier
+    let a = m.process(InputEvent::down("v"), now);
+    assert!(
+        a.contains(&OutputAction::SendKana("、".to_string())),
+        "alias must expand to its kana, not literal 'ku_ret': {a:?}"
+    );
+    assert!(
+        a.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "alias function-key token must expand: {a:?}"
+    );
+    assert!(
+        !a.iter().any(|x| matches!(x, OutputAction::SendKana(s) if s == "ku_ret")),
+        "raw alias name must never reach Mozc: {a:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "、");
+}
+
+#[test]
+fn modified_layer_resolves_multichar_alias() {
+    // Modified-layer alias whose first token is a multi-character kana keeps the
+    // mozc_char_len bookkeeping correct (single tentative entry, 2 preedit chars).
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[alias]]
+kya_ret = "きゃ !Return"
+[[modifier]]
+id = "m"
+key = "space"
+kind = "hold"
+hold_detection = "interrupt"
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+[[layer]]
+id = "shifted"
+kind = "modified"
+modifier = "m"
+grid = """
+. . q
+1 ＿ kya_ret
+"""
+"#;
+    let mut m = StateMachine::new(load_layout(toml).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("space"), now);
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(a.contains(&OutputAction::SendKana("きゃ".to_string())), "{a:?}");
+    assert!(a.contains(&OutputAction::SendFunctionKey("Return".to_string())), "{a:?}");
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+}
+
 // ── Conflict detection ────────────────────────────────────────────────────────
 
 #[test]

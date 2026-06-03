@@ -344,14 +344,16 @@ impl StateMachine {
             if mod_output == crate::config::PASSTHROUGH_CELL {
                 return vec![OutputAction::Passthrough(key.to_string())];
             }
-            let actions = vec![OutputAction::SendKana(mod_output.clone())];
-            self.tentative_buffer.push(TentativeChar::new(
-                mod_output,
-                vec![key.to_string()],
-                None,
-                Vec::new(),
-            ));
-            return actions;
+            // Resolve aliases / multi-token sequences / function keys, same as the
+            // base layer — otherwise an alias name like "ku_ret" would be sent to
+            // Mozc verbatim instead of expanding to "、 !Return".
+            let tokens: Vec<String> = self
+                .resolve_sequence(&mod_output)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            return self.emit_sequence(&refs, vec![key.to_string()], None);
         }
 
         // Mutual chord (symmetric=true): fire immediately when all keys are held.
