@@ -499,6 +499,69 @@ fn yoon_chord_backspace_removes_both_chars() {
     assert_eq!(m.tentative_kana_string(), "");
 }
 
+// ── 3 キー以上の同時シフト（最長一致 + 段階的アップグレード） ──────────────────
+
+#[test]
+fn three_key_chord_longest_match_wins() {
+    // naginata: w=き, h=く base; [w,h]→きゃ; [w,h,j]→ぎゃ。
+    // w h j を順に押すと、きゃ を投機後、3 キー目 j で ぎゃ へアップグレードする。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    let a1 = m.process(InputEvent::down("w"), now);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())), "{a1:?}");
+    let a2 = m.process(InputEvent::down("h"), now);
+    assert!(a2.contains(&OutputAction::SendKana("きゃ".to_string())), "2-key chord first: {a2:?}");
+    // 3 キー目: きゃ(2 文字)を BS×2 で消し ぎゃ を出す。
+    let a3 = m.process(InputEvent::down("j"), now);
+    let bs = a3.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 2, "upgrading きゃ(2 chars) to ぎゃ needs 2 BackSpaces: {a3:?}");
+    assert!(a3.contains(&OutputAction::SendKana("ぎゃ".to_string())), "{a3:?}");
+    assert_eq!(m.tentative_kana_string(), "ぎゃ");
+}
+
+#[test]
+fn three_key_chord_subset_still_works() {
+    // 部分集合の 2 キー chord（[w,h]→きゃ）は 3 キーを揃えなければそのまま成立する。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("w"), now);
+    let a = m.process(InputEvent::down("h"), now);
+    assert!(a.contains(&OutputAction::SendKana("きゃ".to_string())), "{a:?}");
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+}
+
+#[test]
+fn three_key_chord_simultaneous() {
+    // 完全同時押し（w h j すべて held）でも最長一致 [w,h,j]→ぎゃ が選ばれる。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("w"), now);
+    m.process(InputEvent::down("h"), now);
+    m.process(InputEvent::down("j"), now);
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    m.process(InputEvent::up("j"), now);
+    assert_eq!(m.tentative_kana_string(), "ぎゃ");
+}
+
+#[test]
+fn three_key_chord_multichar_output() {
+    // 3 キー [h,period,f]→ぐぅゎ（3 文字: ぐ・ぅ・ゎ）。最長一致と H1（文字数ベース
+    // BS）が多文字出力でも破綻しないことを確認。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("h"), now);
+    m.process(InputEvent::down("period"), now);
+    m.process(InputEvent::down("f"), now);
+    assert_eq!(m.tentative_kana_string(), "ぐぅゎ");
+    // 手動 BS は 3 文字分。
+    let bs = m.process(InputEvent::down("BackSpace"), now);
+    let n = bs.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(n, 3, "deleting ぐぅゎ(3 chars) must emit 3 BackSpaces: {bs:?}");
+}
+
 #[test]
 fn mutual_chord_no_timeout_after_window() {
     // symmetric=true chord fires regardless of timing — even well after chord_window_ms.

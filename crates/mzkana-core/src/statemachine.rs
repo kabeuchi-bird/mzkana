@@ -904,23 +904,30 @@ impl StateMachine {
     ///      is merely lingering unreleased.
     ///   2. Only if no fresh chord matches, allow a consumed partner — this is the
     ///      genuine rolling case where the shared key is held across chords
-    ///      (e.g. hold 'j', tap 'f' then 'e' → が, で).
+    ///      (e.g. hold 'j', tap 'f' then 'e' → が, で), and the longer-chord upgrade
+    ///      (e.g. (w,h)→きゃ already fired, now (w,h,j)→ぎゃ with w,h still held).
     ///
+    /// Within each pass the LONGEST chord wins, so a 3+-key chord (w,h,j) is chosen
+    /// over its 2-key subset (w,h); the speculative きゃ is then rewritten to ぎゃ.
     /// In both passes every chord key must be physically held.
     fn find_mutual_chord_match(&self, new_key: &str) -> Option<crate::config::ChordRule> {
-        let matches = |require_fresh_partners: bool| {
-            self.layout.chords.iter().find(|chord| {
-                chord.symmetric
-                    && chord.keys.iter().any(|k| k == new_key)
-                    && chord.keys.iter().all(|k| self.held_keys.contains(k))
-                    && (!require_fresh_partners
-                        || chord
-                            .keys
-                            .iter()
-                            .all(|k| k == new_key || !self.chord_consumed_keys.contains(k)))
-            })
+        let best = |require_fresh_partners: bool| {
+            self.layout
+                .chords
+                .iter()
+                .filter(|chord| {
+                    chord.symmetric
+                        && chord.keys.iter().any(|k| k == new_key)
+                        && chord.keys.iter().all(|k| self.held_keys.contains(k))
+                        && (!require_fresh_partners
+                            || chord
+                                .keys
+                                .iter()
+                                .all(|k| k == new_key || !self.chord_consumed_keys.contains(k)))
+                })
+                .max_by_key(|chord| chord.keys.len())
         };
-        matches(true).or_else(|| matches(false)).cloned()
+        best(true).or_else(|| best(false)).cloned()
     }
 
     /// Fire a mutual chord: rewrite any speculative emissions from pending chord keys,
