@@ -249,6 +249,38 @@ fn chord_past_window_does_not_fire() {
 }
 
 #[test]
+fn chord_at_exact_window_boundary_fires() {
+    // Boundary regression (< vs <=): the chord window is inclusive — a key arriving
+    // exactly chord_window_ms after the first must STILL form the chord. SHIN_GETA's
+    // [f,j]→を is a timed chord (symmetric=false) with the default 50 ms window.
+    // prune_expired_pending keeps pending keys while `now - ts <= window`, so the
+    // == boundary fires; a regression to `<` would drop f here and break this.
+    const WINDOW_MS: u64 = 50; // SHIN_GETA [settings] chord_window_ms
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    let a1 = m.process(InputEvent::down("f"), t0);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())));
+    // j arrives at exactly t0 + window (the inclusive boundary).
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(WINDOW_MS));
+    assert!(a2.contains(&OutputAction::Backspace), "boundary must rewrite: {a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("を".to_string())), "boundary must chord: {a2:?}");
+    assert_eq!(m.tentative_kana_string(), "を");
+}
+
+#[test]
+fn chord_one_ms_past_window_does_not_fire() {
+    // Companion to the boundary test: one millisecond past the inclusive window
+    // must NOT chord, pinning the exact `<=` semantics from both sides.
+    const WINDOW_MS: u64 = 50;
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    m.process(InputEvent::down("f"), t0);
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(WINDOW_MS + 1));
+    assert!(!a2.contains(&OutputAction::SendKana("を".to_string())), "past boundary must not chord: {a2:?}");
+    assert!(m.tentative_kana_string().starts_with('き'), "got {:?}", m.tentative_kana_string());
+}
+
+#[test]
 fn chord_rewrite() {
     let mut m = sm(SHIN_GETA);
     let now = Instant::now();
