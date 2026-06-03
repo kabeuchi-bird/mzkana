@@ -702,7 +702,7 @@ window_ms = 80
 
 [[chord]]
 keys      = ["h", "period", "f"]
-output    = "ぐぅゎ"
+output    = "ぐゎ"
 symmetric = true
 window_ms = 80
 

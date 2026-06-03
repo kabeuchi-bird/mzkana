@@ -548,18 +548,18 @@ fn three_key_chord_simultaneous() {
 
 #[test]
 fn three_key_chord_multichar_output() {
-    // 3 キー [h,period,f]→ぐぅゎ（3 文字: ぐ・ぅ・ゎ）。最長一致と H1（文字数ベース
+    // 3 キー [h,period,f]→ぐゎ（2 文字: ぐ・ゎ）。最長一致と H1（文字数ベース
     // BS）が多文字出力でも破綻しないことを確認。
     let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
     let now = Instant::now();
     m.process(InputEvent::down("h"), now);
     m.process(InputEvent::down("period"), now);
     m.process(InputEvent::down("f"), now);
-    assert_eq!(m.tentative_kana_string(), "ぐぅゎ");
-    // 手動 BS は 3 文字分。
+    assert_eq!(m.tentative_kana_string(), "ぐゎ");
+    // 手動 BS は 2 文字分。
     let bs = m.process(InputEvent::down("BackSpace"), now);
     let n = bs.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
-    assert_eq!(n, 3, "deleting ぐぅゎ(3 chars) must emit 3 BackSpaces: {bs:?}");
+    assert_eq!(n, 2, "deleting ぐゎ(2 chars) must emit 2 BackSpaces: {bs:?}");
 }
 
 #[test]
