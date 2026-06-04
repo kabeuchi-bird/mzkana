@@ -1252,7 +1252,7 @@ show_prediction      = true    # 合成中の予測候補を表示するか
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `id` | string | 必須 | 識別子 |
-| `key` | string \| array[string] | 必須 | 起動キー。単一（`"space"`）でも複数（`["space", "shift"]`）でも可。複数指定時はいずれのキーでも同じ modifier が起動する |
+| `key` | string \| array[string] | 必須 | 起動キー。単一（`"space"`）でも複数（`["space", "Henkan"]`）でも可。複数指定時はいずれのキーでも同じ modifier が起動する。値は §4 の識別子（C++ の `keySymToString(key.sym())`）。**bare modifier（`Shift_L` / `Control_L` 等）は C++ 側の `key.isModifier()` で除外されコアに届かないため起動キーに使えない**。空文字・空配列は読込時にエラー |
 | `kind` | enum | `"hold"` | `"hold"` / `"oneshot"` |
 | `hold_detection` | enum | `"interrupt"` | `"interrupt"` / `"timeout"` |
 | `hold_timeout_ms` | integer | 150 | timeout 方式時のみ |

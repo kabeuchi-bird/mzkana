@@ -732,6 +732,53 @@ fn multikey_modifier_activates_layer_from_any_key() {
 }
 
 #[test]
+fn multikey_modifier_stays_active_when_one_of_several_released() {
+    // Press both mapped keys, release ONE; the modifier must remain held because
+    // the other key is still down. Regression for per-key hold tracking.
+    let layout = load_layout(MULTIKEY_MODIFIER_LAYOUT).unwrap();
+    let now = Instant::now();
+    let mut m = StateMachine::new(layout);
+    m.process(InputEvent::down("space"), now);
+    m.process(InputEvent::down("Shift_R"), now);
+    m.process(InputEvent::up("space"), now); // release one of the two
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(
+        a.contains(&OutputAction::SendKana("ぁ".to_string())),
+        "modifier must stay active while Shift_R is still held: {a:?}"
+    );
+}
+
+#[test]
+fn modifier_empty_key_is_rejected() {
+    // `key = []`, `key = ""`, and all-blank arrays must fail to load with a clear
+    // error rather than silently creating an untriggerable modifier.
+    let base = |key: &str| format!(
+        r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[modifier]]
+id  = "m"
+key = {key}
+kind = "hold"
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+"#
+    );
+    assert!(load_layout(&base(r#""""#)).is_err(), "empty string key must be rejected");
+    assert!(load_layout(&base("[]")).is_err(), "empty array key must be rejected");
+    assert!(load_layout(&base(r#"["", " "]"#)).is_err(), "all-blank array must be rejected");
+    // A valid single key still works.
+    assert!(load_layout(&base(r#""space""#)).is_ok());
+}
+
+#[test]
 fn modifier_key_single_string_still_works() {
     // Backward compat: `key = "space"` (a bare string) still deserializes to a
     // single-element keys vec.

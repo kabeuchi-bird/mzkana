@@ -159,10 +159,24 @@ where
         One(String),
         Many(Vec<String>),
     }
-    Ok(match StringOrVec::deserialize(deserializer)? {
+    let raw = match StringOrVec::deserialize(deserializer)? {
         StringOrVec::One(s) => vec![s],
         StringOrVec::Many(v) => v,
-    })
+    };
+    // Drop blank entries and require at least one real key, so `key = ""`,
+    // `key = []`, and `key = ["", " "]` fail with a clear error instead of
+    // silently producing a modifier that can never be triggered.
+    let keys: Vec<String> = raw
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if keys.is_empty() {
+        return Err(serde::de::Error::custom(
+            "modifier `key` must be a non-empty string or a non-empty array of non-empty strings",
+        ));
+    }
+    Ok(keys)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
