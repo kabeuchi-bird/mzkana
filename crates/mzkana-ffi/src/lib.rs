@@ -224,7 +224,9 @@ pub unsafe extern "C" fn mzkana_engine_select_candidate(
     engine: *mut MzkanaEngine,
     candidate_id: i32,
 ) -> MzkanaResult {
-    if engine.is_null() {
+    // candidate_id < 0 is the "not selectable" sentinel; treat it as a no-op so it
+    // never reaches Mozc as a bogus SELECT_CANDIDATE or clears the UI caches.
+    if engine.is_null() || candidate_id < 0 {
         return MzkanaResult::default();
     }
     let engine = &mut *engine;

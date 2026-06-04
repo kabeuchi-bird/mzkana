@@ -274,8 +274,13 @@ public:
     }
 
     void select(fcitx::InputContext *ic) const override {
+        if (engine_ == nullptr) {
+            return;
+        }
         // id_ < 0 means Mozc assigned no selectable id; ignore the request.
-        if (!engine_ || id_ < 0) return;
+        if (id_ < 0) {
+            return;
+        }
         MzkanaResult r = mzkana_engine_select_candidate(engine_, id_);
         if (r.commit_len > 0) {
             ic->commitString(std::string(
@@ -330,6 +335,8 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
         sig += std::to_string(c.id);
         sig += ':';
         sig += value;
+        sig += '\x1e';
+        sig += comment; // include annotation so changes to it trigger a rebuild
         sig += '\x1f';
         entries.push_back({std::move(value), std::move(comment), c.id});
     }
