@@ -678,6 +678,78 @@ fn center_shift_modifier_layer() {
     assert!(a.contains(&OutputAction::SendKana("め".to_string())));
 }
 
+const MULTIKEY_MODIFIER_LAYOUT: &str = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[modifier]]
+id  = "center"
+key = ["space", "Shift_R"]
+kind = "hold"
+hold_detection = "interrupt"
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+[[layer]]
+id = "shifted"
+kind = "modified"
+modifier = "center"
+grid = """
+. . q
+1 ＿ ぁ
+"""
+"#;
+
+#[test]
+fn modifier_key_accepts_array_of_keys() {
+    // `key = ["space", "Shift_R"]` parses into both activation keys.
+    let layout = load_layout(MULTIKEY_MODIFIER_LAYOUT).unwrap();
+    assert_eq!(layout.modifiers[0].keys, vec!["space".to_string(), "Shift_R".to_string()]);
+    assert!(layout.modifiers[0].matches("space"));
+    assert!(layout.modifiers[0].matches("Shift_R"));
+    assert!(!layout.modifiers[0].matches("q"));
+}
+
+#[test]
+fn multikey_modifier_activates_layer_from_any_key() {
+    // Either key in the modifier's `key` array must activate the modified layer.
+    let layout = load_layout(MULTIKEY_MODIFIER_LAYOUT).unwrap();
+    let now = Instant::now();
+    for trigger in ["space", "Shift_R"] {
+        let mut m = StateMachine::new(layout.clone());
+        m.process(InputEvent::down(trigger), now);
+        let a = m.process(InputEvent::down("q"), now);
+        assert!(
+            a.contains(&OutputAction::SendKana("ぁ".to_string())),
+            "{trigger} should activate center_shift layer: {a:?}"
+        );
+    }
+}
+
+#[test]
+fn modifier_key_single_string_still_works() {
+    // Backward compat: `key = "space"` (a bare string) still deserializes to a
+    // single-element keys vec.
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[modifier]]
+id  = "m"
+key = "space"
+kind = "hold"
+"#;
+    let layout = load_layout(toml).unwrap();
+    assert_eq!(layout.modifiers[0].keys, vec!["space".to_string()]);
+    assert!(layout.modifiers[0].matches("space"));
+}
+
 #[test]
 fn modified_layer_resolves_alias() {
     // Regression: a modified (center-shift) layer cell that names an alias must be

@@ -1252,7 +1252,7 @@ show_prediction      = true    # 合成中の予測候補を表示するか
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `id` | string | 必須 | 識別子 |
-| `key` | string | 必須 | キー識別子 |
+| `key` | string \| array[string] | 必須 | 起動キー。単一（`"space"`）でも複数（`["space", "shift"]`）でも可。複数指定時はいずれのキーでも同じ modifier が起動する |
 | `kind` | enum | `"hold"` | `"hold"` / `"oneshot"` |
 | `hold_detection` | enum | `"interrupt"` | `"interrupt"` / `"timeout"` |
 | `hold_timeout_ms` | integer | 150 | timeout 方式時のみ |

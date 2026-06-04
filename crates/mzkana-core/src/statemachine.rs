@@ -890,7 +890,7 @@ impl StateMachine {
     }
 
     fn modifier_index(&self, key: &str) -> Option<usize> {
-        self.layout.modifiers.iter().position(|m| m.key == key)
+        self.layout.modifiers.iter().position(|m| m.matches(key))
     }
 
     /// Return the mutual chord (symmetric=true) that `new_key` completes.

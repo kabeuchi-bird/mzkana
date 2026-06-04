@@ -120,7 +120,11 @@ pub enum SensitiveFieldBehavior {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ModifierDef {
     pub id: String,
-    pub key: String,
+    /// Physical key(s) that activate this modifier. Accepts either a single key
+    /// (`key = "space"`) or a list (`key = ["space", "shift"]`); both are stored
+    /// here. Use [`ModifierDef::matches`] to test membership.
+    #[serde(rename = "key", deserialize_with = "de_string_or_vec")]
+    pub keys: Vec<String>,
     #[serde(default = "default_hold")]
     pub kind: ModifierKind,
     #[serde(default = "default_interrupt")]
@@ -133,6 +137,32 @@ pub struct ModifierDef {
     /// Supports alias names, `!FunctionKey`, and space-separated multi-token sequences.
     #[serde(default)]
     pub tap_output: Option<String>,
+}
+
+impl ModifierDef {
+    /// True if `key` is one of this modifier's activation keys.
+    pub fn matches(&self, key: &str) -> bool {
+        self.keys.iter().any(|k| k == key)
+    }
+}
+
+/// Deserialize a field that may be either a single string or an array of strings
+/// into a `Vec<String>`. Keeps `key = "space"` working while also accepting
+/// `key = ["space", "shift"]`.
+fn de_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::One(s) => vec![s],
+        StringOrVec::Many(v) => v,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -610,8 +640,11 @@ impl Layout {
     }
 
     fn check_modifier_key_overlap(&self) -> Result<()> {
-        let modifier_keys: HashSet<&str> =
-            self.modifiers.iter().map(|m| m.key.as_str()).collect();
+        let modifier_keys: HashSet<&str> = self
+            .modifiers
+            .iter()
+            .flat_map(|m| m.keys.iter().map(String::as_str))
+            .collect();
 
         // Warn if direct_trigger key is also a modifier key
         if let Some(dt) = &self.direct_trigger {
@@ -670,7 +703,9 @@ pub fn analyze_conflicts(layout: &Layout) -> Vec<Conflict> {
     // Collect the special (non-base) role(s) each key plays.
     let mut roles: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for m in &layout.modifiers {
-        roles.entry(m.key.as_str()).or_default().push(format!("modifier '{}'", m.id));
+        for k in &m.keys {
+            roles.entry(k.as_str()).or_default().push(format!("modifier '{}'", m.id));
+        }
     }
     if let Some(dt) = &layout.direct_trigger {
         for k in &dt.keys {
@@ -716,8 +751,11 @@ pub fn analyze_conflicts(layout: &Layout) -> Vec<Conflict> {
 
     // Chord members that are also modifier keys: the modifier intercepts the press
     // before the chord can form.
-    let mod_keys: std::collections::HashSet<&str> =
-        layout.modifiers.iter().map(|m| m.key.as_str()).collect();
+    let mod_keys: std::collections::HashSet<&str> = layout
+        .modifiers
+        .iter()
+        .flat_map(|m| m.keys.iter().map(String::as_str))
+        .collect();
     for c in &layout.chords {
         for k in &c.keys {
             if mod_keys.contains(k.as_str()) {
