@@ -321,7 +321,8 @@ pub struct MzkanaCandidate {
     pub value_len: u32,
     pub annotation: *const u8,
     pub annotation_len: u32,
-    /// Mozc-internal candidate id (for SELECT_CANDIDATE); 0 if unknown.
+    /// Mozc-internal candidate id (for SELECT_CANDIDATE), or -1 when the candidate
+    /// has no id and therefore cannot be selected by id.
     pub id: i32,
 }
 
@@ -332,7 +333,7 @@ impl Default for MzkanaCandidate {
             value_len: 0,
             annotation: std::ptr::null(),
             annotation_len: 0,
-            id: 0,
+            id: -1,
         }
     }
 }
@@ -369,7 +370,9 @@ pub unsafe extern "C" fn mzkana_engine_candidate(
         value_len: (c.value.len() - 1) as u32,
         annotation,
         annotation_len,
-        id: c.id,
+        // -1 signals "no selectable id"; the C++ layer must not call
+        // mzkana_engine_select_candidate for such an entry.
+        id: c.id.unwrap_or(-1),
     }
 }
 

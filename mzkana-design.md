@@ -8,9 +8,10 @@ Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様�
 > かな送信は AS_IS、セッション初期化は TURN_ON_IME、BS-rewrite は preedit 文字数
 > ベース、オートリピート抑止は core 側。
 >
-> あわせて未実装の GUI 機能を設計章として追加: §11.5 候補ウィンドウ（予測・変換候補、
-> Mozc 準拠、Phase 4）、§13.5 設定 GUI（fcitx5-configtool 連携で配列ファイル選択、
-> Phase 5）。いずれも「設計検討」であり実装はこれから。
+> GUI 機能の章: §11.5 候補ウィンドウ（予測・変換候補、Mozc 準拠、Phase 4）は
+> **Rust（コア + FFI）実装済み・単体テスト済み、C++ 部分は記述済みだが fcitx5
+> 開発環境が無く未コンパイル（実機ビルド要）**。§13.5 設定 GUI（fcitx5-configtool
+> 連携で配列ファイル選択、Phase 5）は設計検討のみで未実装。
 
 ---
 
@@ -1090,7 +1091,8 @@ sensitive_field_behavior = "passthrough"
 
 ## 11.5. 候補ウィンドウ（予測・変換候補の表示）
 
-> 設計検討（未実装、Phase 4 で実装予定）。Mozc が返す候補を fcitx5 の Input Panel に
+> Phase 4。Rust（コア + FFI）実装済み・単体テスト済み、C++ 部分は記述済みだが
+> fcitx5 開発環境が無く未コンパイル（実機ビルド要）。Mozc が返す候補を fcitx5 の Input Panel に
 > 表示し、変換動作は可能な限り Mozc に倣う。
 ### 背景と現状
 
@@ -1252,7 +1254,7 @@ show_prediction      = true    # 合成中の予測候補を表示するか
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `id` | string | 必須 | 識別子 |
-| `key` | string \| array[string] | 必須 | 起動キー。単一（`"space"`）でも複数（`["space", "Henkan"]`）でも可。複数指定時はいずれのキーでも同じ modifier が起動する。値は §4 の識別子（C++ の `keySymToString(key.sym())`）。**bare modifier（`Shift_L` / `Control_L` 等）は C++ 側の `key.isModifier()` で除外されコアに届かないため起動キーに使えない**。空文字・空配列は読込時にエラー |
+| `key` | string \| array[string] | 必須 | 起動キー。単一（`"space"`）でも複数（`["space", "henkan"]`）でも可。複数指定時はいずれのキーでも同じ modifier が起動する。値は §4 の識別子（C++ の `keySymToString(key.sym())` を小文字化した形）。**bare modifier（`Shift_L` / `Control_L` 等）は C++ 側の `key.isModifier()` で除外されコアに届かないため起動キーに使えない**。空文字・空配列は読込時にエラー |
 | `kind` | enum | `"hold"` | `"hold"` / `"oneshot"` |
 | `hold_detection` | enum | `"interrupt"` | `"interrupt"` / `"timeout"` |
 | `hold_timeout_ms` | integer | 150 | timeout 方式時のみ |
@@ -1506,7 +1508,7 @@ Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
 | 1 | 4 種類の既存配列が cli で正しいかな列を出力する | ✅ 完了 |
 | 2 | cli から実際の Mozc サーバに接続して preedit/result が得られる | ✅ 完了 |
 | 3 | fcitx5 上で実用入力ができ、設定リロードが動く | ✅ 完了（実機動作確認済み） |
-| 4 | 予測・変換候補が Mozc 準拠で表示され、変換操作ができる | 未着手 |
+| 4 | 予測・変換候補が Mozc 準拠で表示され、変換操作ができる | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
 | 5 | configtool から配列ファイルを選択・即時反映できる | 未着手 |
 
 ---

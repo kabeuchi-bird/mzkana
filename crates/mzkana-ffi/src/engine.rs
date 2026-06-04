@@ -38,7 +38,8 @@ pub struct FfiCandidate {
     pub value: Vec<u8>,
     /// annotation bytes followed by a single NUL, or `None` when absent.
     pub annotation: Option<Vec<u8>>,
-    pub id: i32,
+    /// Mozc-internal candidate id, or `None` when not selectable by id.
+    pub id: Option<i32>,
 }
 
 impl FfiCandidate {
@@ -196,8 +197,11 @@ impl Engine {
             }
         }
         // A committed candidate ends the composition: clear local SM state so the
-        // released chord keys / tentative buffer don't leak into the next input.
+        // released chord keys / tentative buffer don't leak into the next input,
+        // and drop the cached preedit/candidates so the FFI accessors never report
+        // stale UI state (including on the Mozc-failure path).
         self.sm.reset();
+        self.clear_ui_cache();
         ProcessResult {
             consumed,
             preedit: self.preedit.clone(),
@@ -206,6 +210,15 @@ impl Engine {
             forward_key: None,
             forward_mods: 0,
         }
+    }
+
+    /// Drop the cached preedit and candidate window so the FFI accessors
+    /// (`candidate_count` / `focused_index` / `ProcessResult.preedit`) don't
+    /// return state left over from a finished composition.
+    fn clear_ui_cache(&mut self) {
+        self.preedit.clear();
+        self.candidates.clear();
+        self.focused_index = None;
     }
 
     pub fn mozc_available(&self) -> bool {
@@ -250,7 +263,7 @@ impl Engine {
                 self.mozc = None;
             }
         }
-        self.preedit.clear();
+        self.clear_ui_cache();
     }
 
     /// Handle focus loss (IM deactivation), honoring the `on_focus_change` setting (H3).

@@ -10,6 +10,8 @@
 #include <fcitx/text.h>
 
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 namespace mzkana {
 
@@ -272,7 +274,8 @@ public:
     }
 
     void select(fcitx::InputContext *ic) const override {
-        if (!engine_) return;
+        // id_ < 0 means Mozc assigned no selectable id; ignore the request.
+        if (!engine_ || id_ < 0) return;
         MzkanaResult r = mzkana_engine_select_candidate(engine_, id_);
         if (r.commit_len > 0) {
             ic->commitString(std::string(
@@ -294,20 +297,28 @@ private:
 void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
     uint32_t n = mzkana_engine_candidate_count(engine_);
     if (n == 0) {
-        // No window: drop any existing candidate list.
-        if (ic->inputPanel().candidateList()) {
+        // No window: drop any existing candidate list (only touch the UI if there
+        // is one to clear, so empty ticks stay cheap).
+        if (!lastCandidateSig_.empty() || ic->inputPanel().candidateList()) {
             ic->inputPanel().setCandidateList(nullptr);
             ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+            lastCandidateSig_.clear();
         }
         return;
     }
 
-    auto list = std::make_unique<fcitx::CommonCandidateList>();
-    list->setPageSize(9);
-    list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
-    // Mozc's conversion/prediction window is vertical.
-    list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical);
+    int32_t focused = mzkana_engine_focused_index(engine_);
 
+    // Build a signature of value/id per candidate plus the focused index. If it
+    // matches the last render, the window is unchanged — skip the rebuild so the
+    // ~100 Hz tick doesn't thrash the candidate list and panel.
+    std::string sig;
+    sig.reserve(n * 8);
+    sig += std::to_string(focused);
+    sig += '|';
+    struct Entry { std::string value, comment; int32_t id; };
+    std::vector<Entry> entries;
+    entries.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         MzkanaCandidate c = mzkana_engine_candidate(engine_, i);
         std::string value(reinterpret_cast<const char *>(c.value), c.value_len);
@@ -316,11 +327,28 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
             comment.assign(reinterpret_cast<const char *>(c.annotation),
                            c.annotation_len);
         }
-        list->append<MzkanaCandidateWord>(engine_, c.id, value, comment);
+        sig += std::to_string(c.id);
+        sig += ':';
+        sig += value;
+        sig += '\x1f';
+        entries.push_back({std::move(value), std::move(comment), c.id});
+    }
+    if (sig == lastCandidateSig_) {
+        return; // unchanged — nothing to do
+    }
+    lastCandidateSig_ = std::move(sig);
+
+    auto list = std::make_unique<fcitx::CommonCandidateList>();
+    list->setPageSize(9);
+    list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    // Mozc's conversion/prediction window is vertical.
+    list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical);
+
+    for (auto &e : entries) {
+        list->append<MzkanaCandidateWord>(engine_, e.id, e.value, e.comment);
     }
 
     // During conversion Mozc reports the focused index; highlight it.
-    int32_t focused = mzkana_engine_focused_index(engine_);
     if (focused >= 0 && static_cast<uint32_t>(focused) < n) {
         list->setGlobalCursorIndex(focused);
     }
@@ -348,6 +376,10 @@ bool MzkanaFcitxEngine::handleCandidateKey(fcitx::InputContext *ic,
 void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {
     ic->inputPanel().setClientPreedit(fcitx::Text());
     ic->inputPanel().setPreedit(fcitx::Text());
+    // Also drop any candidate window and its render cache, otherwise a stale list
+    // lingers after reset/deactivate and onTick keeps rebuilding it at ~100 Hz.
+    ic->inputPanel().setCandidateList(nullptr);
+    lastCandidateSig_.clear();
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
     lastPreedit_.clear();

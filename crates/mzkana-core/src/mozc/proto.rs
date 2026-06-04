@@ -232,7 +232,9 @@ pub struct Candidate {
     /// Candidate text.
     pub value: String,
     /// Mozc-internal candidate id, used by SELECT_CANDIDATE / HIGHLIGHT_CANDIDATE.
-    pub id: i32,
+    /// `None` when Mozc did not assign one (such a candidate cannot be selected
+    /// by id and must not be exposed to the selection API).
+    pub id: Option<i32>,
     /// Optional annotation (description / suffix, e.g. "[半][カナ]").
     pub annotation: Option<String>,
 }
@@ -295,7 +297,7 @@ pub fn decode_response(data: &[u8]) -> std::result::Result<DecodedOutput, prost:
             out.candidates.push(Candidate {
                 index: c.index,
                 value: c.value,
-                id: c.id.unwrap_or(0),
+                id: c.id,
                 annotation,
             });
         }

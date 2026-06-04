@@ -227,14 +227,22 @@ mod tests {
 
     #[test]
     fn apply_op_maps_each_variant() {
+        // Cover every Op variant so a new mapping in apply_op can't drift untested.
         let session = MockSession::new(vec![
             Ok(out("き")), Ok(out("")), Ok(out("")), Ok(out("")),
+            Ok(out("")), Ok(out("")), Ok(out("")),
         ]);
         assert_eq!(apply_op(&session, &Op::SendKana("き".into())).unwrap().preedit, "き");
         apply_op(&session, &Op::Backspace).unwrap();
         apply_op(&session, &Op::Submit).unwrap();
+        apply_op(&session, &Op::Revert).unwrap();
+        apply_op(&session, &Op::SendFunctionKey("space".into())).unwrap();
+        apply_op(&session, &Op::SendModified { key: "Left".into(), mods: 1 }).unwrap();
         apply_op(&session, &Op::SelectCandidate(42)).unwrap();
-        assert_eq!(*session.calls.borrow(), vec!["kana:き", "bs", "submit", "select:42"]);
+        assert_eq!(
+            *session.calls.borrow(),
+            vec!["kana:き", "bs", "submit", "revert", "fn:space", "mod:Left:1", "select:42"]
+        );
     }
 
     #[test]

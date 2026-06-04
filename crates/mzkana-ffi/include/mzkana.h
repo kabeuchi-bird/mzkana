@@ -64,7 +64,8 @@ typedef struct MzkanaCandidate {
   const uint8_t *annotation;
   uint32_t annotation_len;
   /**
-   * Mozc-internal candidate id (for SELECT_CANDIDATE); 0 if unknown.
+   * Mozc-internal candidate id (for SELECT_CANDIDATE), or -1 when the candidate
+   * has no id and therefore cannot be selected by id.
    */
   int32_t id;
 } MzkanaCandidate;

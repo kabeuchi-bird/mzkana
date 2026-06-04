@@ -52,6 +52,10 @@ private:
     std::unique_ptr<fcitx::EventSourceTime> tickTimer_;
     fcitx::TrackableObjectReference<fcitx::InputContext> tickIc_;
     std::string lastPreedit_;
+    // Signature of the last-rendered candidate window (values + ids + focused
+    // index). applyCandidates rebuilds the fcitx5 list only when this changes, so
+    // the ~100 Hz tick doesn't reconstruct an identical window every frame.
+    std::string lastCandidateSig_;
 
     std::string defaultConfigPath() const;
     void tryInitEngine();

@@ -1893,10 +1893,10 @@ mod proto_tests {
         assert_eq!(out.candidate_size, 2);
         assert_eq!(out.candidates.len(), 2);
         assert_eq!(out.candidates[0].value, "木");
-        assert_eq!(out.candidates[0].id, 101);
+        assert_eq!(out.candidates[0].id, Some(101));
         assert_eq!(out.candidates[0].annotation, None);
         assert_eq!(out.candidates[1].value, "気");
-        assert_eq!(out.candidates[1].id, 102);
+        assert_eq!(out.candidates[1].id, Some(102));
         assert_eq!(out.candidates[1].annotation.as_deref(), Some("[名詞]"));
     }
 
@@ -1924,6 +1924,31 @@ mod proto_tests {
         assert_eq!(out.candidate_size, 3);
         assert_eq!(out.candidates.len(), 3);
         assert_eq!(out.candidates[1].value, "ほん");
+    }
+
+    #[test]
+    fn decode_candidate_without_id_keeps_none() {
+        // A candidate Mozc didn't assign an id to must surface as `id: None`, not 0,
+        // so the selection layer can avoid exposing a bogus id.
+        let output = Output {
+            id: Some(1),
+            candidate_window: Some(CandidateWindow {
+                focused_index: None,
+                size: 1,
+                position: 0,
+                candidate: vec![PbCandidate {
+                    index: 0,
+                    value: "予".to_string(),
+                    id: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let out = decode_response(&output.encode_to_vec()).expect("decode failed");
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(out.candidates[0].id, None, "missing id must stay None, not 0");
     }
 }
 
