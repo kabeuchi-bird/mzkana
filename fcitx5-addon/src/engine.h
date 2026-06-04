@@ -5,6 +5,7 @@
 #include <fcitx/inputmethodengine.h>
 #include <fcitx/instance.h>
 #include <fcitx/inputcontext.h>
+#include <fcitx/candidatelist.h>
 #include <fcitx-utils/event.h>
 #include <fcitx-utils/trackableobject.h>
 
@@ -55,6 +56,8 @@ private:
     std::string defaultConfigPath() const;
     void tryInitEngine();
     void applyResult(fcitx::InputContext *ic, const MzkanaResult &result);
+    void applyCandidates(fcitx::InputContext *ic);
+    bool handleCandidateKey(fcitx::InputContext *ic, const fcitx::Key &key);
     void clearPreedit(fcitx::InputContext *ic);
     void updateTickTimer(bool active, fcitx::InputContext *ic);
     void onTick();

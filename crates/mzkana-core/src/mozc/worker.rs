@@ -32,6 +32,8 @@ pub enum Op {
     Revert,
     SendFunctionKey(String),
     SendModified { key: String, mods: u8 },
+    /// Select and commit a candidate by its Mozc-internal id.
+    SelectCandidate(i32),
 }
 
 /// Anything that can execute the Mozc operations a batch contains.
@@ -45,6 +47,7 @@ pub trait MozcSession {
     fn revert(&self) -> Result<MozcOutput, MozcError>;
     fn send_function_key(&self, name: &str) -> Result<MozcOutput, MozcError>;
     fn send_modified_key(&self, key: &str, mods: u8) -> Result<MozcOutput, MozcError>;
+    fn select_candidate(&self, candidate_id: i32) -> Result<MozcOutput, MozcError>;
 }
 
 impl MozcSession for MozcClient {
@@ -54,6 +57,7 @@ impl MozcSession for MozcClient {
     fn revert(&self) -> Result<MozcOutput, MozcError> { MozcClient::revert(self) }
     fn send_function_key(&self, name: &str) -> Result<MozcOutput, MozcError> { MozcClient::send_function_key(self, name) }
     fn send_modified_key(&self, key: &str, mods: u8) -> Result<MozcOutput, MozcError> { MozcClient::send_modified_key(self, key, mods) }
+    fn select_candidate(&self, candidate_id: i32) -> Result<MozcOutput, MozcError> { MozcClient::select_candidate(self, candidate_id) }
 }
 
 /// Execute one op against a session.  Free function so it can be unit-tested
@@ -66,6 +70,7 @@ pub fn apply_op(session: &dyn MozcSession, op: &Op) -> Result<MozcOutput, MozcEr
         Op::Revert => session.revert(),
         Op::SendFunctionKey(name) => session.send_function_key(name),
         Op::SendModified { key, mods } => session.send_modified_key(key, *mods),
+        Op::SelectCandidate(id) => session.select_candidate(*id),
     }
 }
 
@@ -217,17 +222,19 @@ mod tests {
         fn revert(&self) -> Result<MozcOutput, MozcError> { self.next("revert") }
         fn send_function_key(&self, name: &str) -> Result<MozcOutput, MozcError> { self.next(&format!("fn:{name}")) }
         fn send_modified_key(&self, key: &str, mods: u8) -> Result<MozcOutput, MozcError> { self.next(&format!("mod:{key}:{mods}")) }
+        fn select_candidate(&self, id: i32) -> Result<MozcOutput, MozcError> { self.next(&format!("select:{id}")) }
     }
 
     #[test]
     fn apply_op_maps_each_variant() {
         let session = MockSession::new(vec![
-            Ok(out("き")), Ok(out("")), Ok(out("")),
+            Ok(out("き")), Ok(out("")), Ok(out("")), Ok(out("")),
         ]);
         assert_eq!(apply_op(&session, &Op::SendKana("き".into())).unwrap().preedit, "き");
         apply_op(&session, &Op::Backspace).unwrap();
         apply_op(&session, &Op::Submit).unwrap();
-        assert_eq!(*session.calls.borrow(), vec!["kana:き", "bs", "submit"]);
+        apply_op(&session, &Op::SelectCandidate(42)).unwrap();
+        assert_eq!(*session.calls.borrow(), vec!["kana:き", "bs", "submit", "select:42"]);
     }
 
     #[test]

@@ -1483,11 +1483,15 @@ Phase 3: fcitx5 アドオン化  … 完了
   ├ Preedit 表示分岐（インライン / パネル / buffer）+ sensitive 欄処理
   └ ホットリロード（notify、engine.rs 内）
 
-Phase 4: 候補ウィンドウ（§11.5）  … 未着手
-  ├ decode_response で candidate_window をデコード（MozcOutput に候補追加）
-  ├ FFI: mzkana_engine_candidate_count / _candidate / _focused_index
-  ├ C++: CommonCandidateList で予測（preedit 下）・変換（縦型）を描画
-  └ 変換操作キー（Space/矢印/数字/Enter/Esc）を Mozc へ転送し focused_index に追従
+Phase 4: 候補ウィンドウ（§11.5）  … Rust 実装済み / C++ は実機検証待ち
+  ├ decode_response で candidate_window をデコード（MozcOutput に candidates /
+  │   focused_index / candidate_size を追加）✓ 単体テスト済み
+  ├ FFI: mzkana_engine_candidate_count / _candidate / _focused_index /
+  │   _select_candidate（SELECT_CANDIDATE=3 を worker 経由で送信）✓
+  ├ C++: CommonCandidateList で予測（preedit 下）・変換（縦型 + focused 強調）を描画。
+  │   数字キーは直接選択、Space/矢印/Enter/Esc は Mozc へ転送し focused_index に追従。
+  │   ※ fcitx5 開発環境が無く当環境ではコンパイル未検証（実機ビルド要）
+  └ 候補文字列はエンジンが NUL 終端バッファで保持し次キーイベントまで有効
 
 Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
   ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン

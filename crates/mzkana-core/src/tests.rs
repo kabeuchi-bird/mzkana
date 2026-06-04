@@ -1748,7 +1748,10 @@ tap_output = "あ"
 
 #[cfg(test)]
 mod proto_tests {
-    use crate::mozc::proto::mozc::commands::{preedit::Segment, Output, Preedit, Result as MResult};
+    use crate::mozc::proto::mozc::commands::candidate_window::Candidate as PbCandidate;
+    use crate::mozc::proto::mozc::commands::{
+        preedit::Segment, Annotation, CandidateWindow, Output, Preedit, Result as MResult,
+    };
     use crate::mozc::proto::{decode_response, input_send_kana, Input};
     use prost::Message;
 
@@ -1789,6 +1792,91 @@ mod proto_tests {
         assert_eq!(out.result_value.as_deref(), Some("変換"));
         assert_eq!(out.preedit_text, "かな");
         assert!(out.preedit_has_highlight, "HIGHLIGHT segment should be detected");
+        // No candidate window in this output.
+        assert!(out.candidates.is_empty());
+        assert_eq!(out.focused_index, None);
+        assert_eq!(out.candidate_size, 0);
+    }
+
+    #[test]
+    fn decode_suggestion_candidates() {
+        // Suggestion window: no focused_index. Two candidates with annotations.
+        let output = Output {
+            id: Some(1),
+            preedit: Some(Preedit {
+                cursor: 0,
+                segment: vec![Segment {
+                    annotation: 1,
+                    value: "き".to_string(),
+                    value_length: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            candidate_window: Some(CandidateWindow {
+                focused_index: None,
+                size: 2,
+                position: 0,
+                candidate: vec![
+                    PbCandidate {
+                        index: 0,
+                        value: "木".to_string(),
+                        id: Some(101),
+                        annotation: None,
+                        ..Default::default()
+                    },
+                    PbCandidate {
+                        index: 1,
+                        value: "気".to_string(),
+                        id: Some(102),
+                        annotation: Some(Annotation {
+                            description: Some("[名詞]".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let out = decode_response(&output.encode_to_vec()).expect("decode failed");
+        assert_eq!(out.focused_index, None, "suggestion window has no focus");
+        assert_eq!(out.candidate_size, 2);
+        assert_eq!(out.candidates.len(), 2);
+        assert_eq!(out.candidates[0].value, "木");
+        assert_eq!(out.candidates[0].id, 101);
+        assert_eq!(out.candidates[0].annotation, None);
+        assert_eq!(out.candidates[1].value, "気");
+        assert_eq!(out.candidates[1].id, 102);
+        assert_eq!(out.candidates[1].annotation.as_deref(), Some("[名詞]"));
+    }
+
+    #[test]
+    fn decode_conversion_candidates_with_focus() {
+        // Conversion window: focused_index present.
+        let output = Output {
+            id: Some(1),
+            candidate_window: Some(CandidateWindow {
+                focused_index: Some(1),
+                size: 3,
+                position: 0,
+                candidate: vec![
+                    PbCandidate { index: 0, value: "本".to_string(), id: Some(1), ..Default::default() },
+                    PbCandidate { index: 1, value: "ほん".to_string(), id: Some(2), ..Default::default() },
+                    PbCandidate { index: 2, value: "翻".to_string(), id: Some(3), ..Default::default() },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let out = decode_response(&output.encode_to_vec()).expect("decode failed");
+        assert_eq!(out.focused_index, Some(1), "conversion window is focused");
+        assert_eq!(out.candidate_size, 3);
+        assert_eq!(out.candidates.len(), 3);
+        assert_eq!(out.candidates[1].value, "ほん");
     }
 }
 

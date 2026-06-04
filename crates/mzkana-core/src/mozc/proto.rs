@@ -45,6 +45,8 @@ pub mod cmd {
 pub mod session_cmd {
     pub const REVERT: i32 = 1;
     pub const SUBMIT: i32 = 2;
+    /// Select a candidate by id and commit it (closes the candidate window).
+    pub const SELECT_CANDIDATE: i32 = 3;
     pub const TURN_ON_IME: i32 = 22;
 }
 
@@ -209,7 +211,31 @@ pub fn input_revert(session_id: u64) -> EncodedInput {
     encode_input(Input { r#type: cmd::SEND_COMMAND, id: Some(session_id), command: Some(command), ..Default::default() })
 }
 
+/// Build a SEND_COMMAND / SELECT_CANDIDATE input (commit the candidate with the
+/// given Mozc-internal `candidate_id`, closing the candidate window).
+pub fn input_select_candidate(session_id: u64, candidate_id: i32) -> EncodedInput {
+    let command = SessionCommand {
+        r#type: session_cmd::SELECT_CANDIDATE,
+        id: Some(candidate_id),
+        ..Default::default()
+    };
+    encode_input(Input { r#type: cmd::SEND_COMMAND, id: Some(session_id), command: Some(command), ..Default::default() })
+}
+
 // ── Decoding ─────────────────────────────────────────────────────────────────
+
+/// One entry in the Mozc candidate window (prediction or conversion).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Candidate {
+    /// Display index within the candidate window (0-based).
+    pub index: u32,
+    /// Candidate text.
+    pub value: String,
+    /// Mozc-internal candidate id, used by SELECT_CANDIDATE / HIGHLIGHT_CANDIDATE.
+    pub id: i32,
+    /// Optional annotation (description / suffix, e.g. "[半][カナ]").
+    pub annotation: Option<String>,
+}
 
 /// Decoded Output from Mozc.
 #[derive(Debug, Default)]
@@ -221,6 +247,13 @@ pub struct DecodedOutput {
     pub preedit_text: String,
     /// True if any preedit segment is highlighted (indicates CONVERSION mode).
     pub preedit_has_highlight: bool,
+    /// Candidates in the current window (current page only).
+    pub candidates: Vec<Candidate>,
+    /// Focused candidate index when converting (`has_focused_index`); `None` for a
+    /// suggestion/prediction window or when there is no candidate window.
+    pub focused_index: Option<u32>,
+    /// Total candidate count across all pages (`CandidateWindow.size`).
+    pub candidate_size: u32,
 }
 
 /// Decode a Mozc IPC response into `DecodedOutput`.
@@ -249,6 +282,23 @@ pub fn decode_response(data: &[u8]) -> std::result::Result<DecodedOutput, prost:
             }
         }
         out.preedit_text = preedit_str;
+    }
+
+    if let Some(cw) = output.candidate_window {
+        out.candidate_size = cw.size;
+        // has_focused_index ⇒ conversion (focused) window; absent ⇒ suggestion.
+        out.focused_index = cw.focused_index;
+        for c in cw.candidate {
+            // An annotation may carry prefix/suffix/description; surface the most
+            // useful single string (description, falling back to suffix).
+            let annotation = c.annotation.and_then(|a| a.description.or(a.suffix));
+            out.candidates.push(Candidate {
+                index: c.index,
+                value: c.value,
+                id: c.id.unwrap_or(0),
+                annotation,
+            });
+        }
     }
 
     Ok(out)
