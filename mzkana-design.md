@@ -157,6 +157,21 @@ enum Output {
 
 相互シフトの本質は「どちらが先でも同じ出力」なので、`Chord` に `symmetric: true` フラグを付ければ単一ロジックで扱える。
 
+### 3 キー以上の同時シフト（最長一致 + 段階的アップグレード）
+
+`chord.keys` は 2 キーに限らず、3 キー以上の同時押し（濁拗音 `ぎゃ` = `[w,h,j]`、
+外来音 `ふぁ` = `[semicolon,j,v]` 等）も表現できる。実装は別経路を持たず、
+speculative + BS-rewrite 機構にそのまま乗る。
+
+- **最長一致**: `find_mutual_chord_match` は、すべてのキーが held で `new_key` を
+  含む symmetric chord のうち **最長のもの** を選ぶ（`max_by_key(keys.len())`）。
+- **段階的アップグレード**: `w↓` で `き`（base）→ `h↓` で `[w,h]→きゃ`（2 キー、
+  BS×1）→ `j↓` で `[w,h,j]→ぎゃ`（3 キー、BS×2 で `きゃ` を消し再送）。途中の
+  `きゃ` は確定前なので BS-rewrite で `ぎゃ` に置き換わる。完全同時押し（w h j が
+  すべて held）でも最長一致で `ぎゃ` が選ばれる。
+- 2 キー部分集合（`[w,h]→きゃ`）と 3 キー（`[w,h,j]→ぎゃ`）は共存でき、`validate`
+  でも競合扱いしない（最長一致で解決）。
+
 ---
 
 ## 4. キー識別子
@@ -509,7 +524,7 @@ roll_over             = true
 # ── Modifier 定義 ─────────────────────────────────
 [[modifier]]
 id              = "center"
-key             = "space"
+key             = "space"        # 複数キーも可: key = ["space", "henkan"]
 kind            = "hold"         # "hold" | "oneshot"
 hold_detection  = "interrupt"    # "interrupt" | "timeout"
 hold_timeout_ms = 150            # timeout 方式のみ参照
@@ -1131,7 +1146,9 @@ fcitx5-addon  : CommonCandidateList を構築し inputPanel().setCandidateList()
 pub struct Candidate {
     pub index: u32,
     pub value: String,
-    pub id: i32,                 // SELECT/HIGHLIGHT_CANDIDATE 用の Mozc 内部 id
+    pub id: Option<i32>,         // SELECT/HIGHLIGHT_CANDIDATE 用の Mozc 内部 id。
+                                 // None は「id 未割当＝選択不可」。FFI では -1 で表現し、
+                                 // C++ / select_candidate は負 id を no-op として無視する。
     pub annotation: Option<String>, // 注釈（[半][カナ] 等、description/suffix）
 }
 
