@@ -41,20 +41,16 @@ public:
     std::string subModeLabelImpl(const fcitx::InputMethodEntry &entry,
                                  fcitx::InputContext &ic) override;
 
+    void clearPreedit(fcitx::InputContext *ic);
+
 private:
     fcitx::Instance *instance_;
     MzkanaEngine *engine_ = nullptr;
     bool mozcAvailable_ = false;
 
-    // C2: ~10 ms periodic timer that drives mzkana_engine_tick while a preedit is
-    // active (chord-confirm deadline, deferred compound-output tail). Stopped when
-    // the preedit is empty to avoid a constant 100 Hz wakeup.
     std::unique_ptr<fcitx::EventSourceTime> tickTimer_;
     fcitx::TrackableObjectReference<fcitx::InputContext> tickIc_;
     std::string lastPreedit_;
-    // Signature of the last-rendered candidate window (values + ids + focused
-    // index). applyCandidates rebuilds the fcitx5 list only when this changes, so
-    // the ~100 Hz tick doesn't reconstruct an identical window every frame.
     std::string lastCandidateSig_;
 
     std::string defaultConfigPath() const;
@@ -62,7 +58,6 @@ private:
     void applyResult(fcitx::InputContext *ic, const MzkanaResult &result);
     void applyCandidates(fcitx::InputContext *ic);
     bool handleCandidateKey(fcitx::InputContext *ic, const fcitx::Key &key);
-    void clearPreedit(fcitx::InputContext *ic);
     void updateTickTimer(bool active, fcitx::InputContext *ic);
     void onTick();
 };

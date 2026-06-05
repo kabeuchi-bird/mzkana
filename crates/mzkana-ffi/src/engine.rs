@@ -10,16 +10,13 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 
 pub struct Engine {
     sm: StateMachine,
-    /// Mozc IPC runs on a worker thread with a hard timeout so a slow/hung
-    /// `mozc_server` can never freeze the UI (C5).
     mozc: Option<MozcWorker>,
-    /// Explicit socket path passed at construction time; None = auto-discover.
     mozc_socket: Option<PathBuf>,
-    /// When Some, don't attempt to reconnect until this instant.
     mozc_retry_at: Option<Instant>,
     config_path: PathBuf,
     _watcher: RecommendedWatcher,
     reload_rx: mpsc::Receiver<()>,
+    trace_enabled: bool,
     preedit: String,
     /// Candidate window from the most recent Mozc output (current page), stored as
     /// NUL-terminated UTF-8 buffers so the FFI layer can hand out C string pointers
@@ -107,6 +104,7 @@ impl Engine {
             config_path: config_path.to_path_buf(),
             _watcher: watcher,
             reload_rx,
+            trace_enabled: std::env::var_os("MZKANA_TRACE").is_some(),
             preedit: String::new(),
             candidates: Vec::new(),
             focused_index: None,
@@ -158,10 +156,7 @@ impl Engine {
         };
 
         let actions = self.sm.process(event, now);
-        // Diagnostic: set MZKANA_TRACE=1 to log every key event and the resulting
-        // state-machine actions. Lets us capture the exact on-device event sequence
-        // behind chord misfires without guessing at interleavings.
-        if std::env::var_os("MZKANA_TRACE").is_some() {
+        if self.trace_enabled {
             eprintln!(
                 "[mzkana-trace] key={key:?} {} shift={shift} → actions={actions:?} tentative={:?}",
                 if is_down { "DOWN" } else { "UP" },
@@ -267,12 +262,14 @@ impl Engine {
     }
 
     /// Handle focus loss (IM deactivation), honoring the `on_focus_change` setting (H3).
-    pub fn focus_out(&mut self) {
+    /// Returns `true` if the composition was preserved (caller should not clear UI).
+    pub fn focus_out_preserved(&mut self) -> bool {
         match self.sm.settings().on_focus_change {
-            // Keep the in-progress composition so it resumes when focus returns.
-            OnFocusChange::Preserve => {}
-            // Discard the in-progress composition (revert + clear preedit).
-            OnFocusChange::Reset => self.reset(),
+            OnFocusChange::Preserve => true,
+            OnFocusChange::Reset => {
+                self.reset();
+                false
+            }
         }
     }
 
@@ -304,7 +301,11 @@ impl Engine {
             OutputAction::MozcSubmit => Some(Op::Submit),
             OutputAction::SendFunctionKey(name) => Some(Op::SendFunctionKey(name.clone())),
             OutputAction::SendModifiedKey { key, mods } => {
-                Some(Op::SendModified { key: key.clone(), mods: *mods })
+                if *mods & mzkana_core::MOD_SUPER != 0 {
+                    None
+                } else {
+                    Some(Op::SendModified { key: key.clone(), mods: *mods })
+                }
             }
             OutputAction::SubmitAndCommit(_) | OutputAction::SubmitThenPassthrough(_) => Some(Op::Submit),
             OutputAction::Passthrough(_) | OutputAction::CommitDirect(_) => None,

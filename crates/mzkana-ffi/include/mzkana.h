@@ -152,10 +152,13 @@ void mzkana_engine_reset(struct MzkanaEngine *engine);
  * Handle focus loss, honoring the layout's `on_focus_change` setting
  * (preserve / reset). Call from the C++ `deactivate` handler.
  *
+ * Returns 1 if the composition state was preserved (caller should NOT clear
+ * preedit), 0 if it was reset (caller should clear preedit).
+ *
  * # Safety
  * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
  */
-void mzkana_engine_focus_out(struct MzkanaEngine *engine);
+uint8_t mzkana_engine_focus_out(struct MzkanaEngine *engine);
 
 /**
  * `sensitive_field_behavior` setting (0 = passthrough, 1 = buffer).

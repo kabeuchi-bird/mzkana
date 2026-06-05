@@ -191,6 +191,9 @@ pub fn input_send_key_code_with_mods(session_id: u64, key_code: u32, mods: u8) -
     encode_input(Input { r#type: cmd::SEND_KEY, id: Some(session_id), key: Some(key), ..Default::default() })
 }
 
+/// Map the statemachine modifier bitmask to Mozc ModifierKey values.
+/// MOD_SUPER (0x08) has no Mozc equivalent and is intentionally omitted —
+/// the caller must fall through to forward_key for Super-modified keys.
 fn mods_to_vec(mods: u8) -> Vec<i32> {
     let mut v = Vec::new();
     if mods & 0x01 != 0 { v.push(modifier_key::SHIFT); }

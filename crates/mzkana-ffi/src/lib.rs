@@ -69,12 +69,13 @@ impl Default for MzkanaResult {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Write `src` into `dst` as NUL-terminated bytes, truncating if needed.
-/// Returns the number of bytes written (excluding NUL).
 fn fill_buf(dst: &mut [u8], src: &str) -> u32 {
-    let bytes = src.as_bytes();
-    let len = bytes.len().min(dst.len().saturating_sub(1));
-    dst[..len].copy_from_slice(&bytes[..len]);
+    let max = dst.len().saturating_sub(1);
+    let mut len = src.len().min(max);
+    while !src.is_char_boundary(len) {
+        len -= 1;
+    }
+    dst[..len].copy_from_slice(&src.as_bytes()[..len]);
     dst[len] = 0;
     len as u32
 }
@@ -248,12 +249,19 @@ pub unsafe extern "C" fn mzkana_engine_reset(engine: *mut MzkanaEngine) {
 /// Handle focus loss, honoring the layout's `on_focus_change` setting
 /// (preserve / reset). Call from the C++ `deactivate` handler.
 ///
+/// Returns 1 if the composition state was preserved (caller should NOT clear
+/// preedit), 0 if it was reset (caller should clear preedit).
+///
 /// # Safety
 /// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn mzkana_engine_focus_out(engine: *mut MzkanaEngine) {
-    if let Some(engine) = engine.as_mut() {
-        engine.0.focus_out();
+pub unsafe extern "C" fn mzkana_engine_focus_out(engine: *mut MzkanaEngine) -> u8 {
+    match engine.as_mut() {
+        Some(e) => {
+            let preserved = e.0.focus_out_preserved();
+            preserved as u8
+        }
+        None => 0,
     }
 }
 

@@ -137,11 +137,13 @@ void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
 
 void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry & /*entry*/,
                                     fcitx::InputContextEvent &event) {
-    // H3: honor on_focus_change (preserve / reset) on focus loss.
+    bool preserved = false;
     if (engine_) {
-        mzkana_engine_focus_out(engine_);
+        preserved = mzkana_engine_focus_out(engine_) != 0;
     }
-    clearPreedit(event.inputContext());
+    if (!preserved) {
+        clearPreedit(event.inputContext());
+    }
 }
 
 void MzkanaFcitxEngine::reset(const fcitx::InputMethodEntry & /*entry*/,
@@ -263,9 +265,10 @@ namespace {
 // back through the C ABI.
 class MzkanaCandidateWord : public fcitx::CandidateWord {
 public:
-    MzkanaCandidateWord(MzkanaEngine *engine, int32_t id, const std::string &text,
+    MzkanaCandidateWord(MzkanaEngine *engine, MzkanaFcitxEngine *host,
+                        int32_t id, const std::string &text,
                         const std::string &comment)
-        : engine_(engine), id_(id) {
+        : engine_(engine), host_(host), id_(id) {
         fcitx::Text t(text);
         setText(std::move(t));
         if (!comment.empty()) {
@@ -277,7 +280,6 @@ public:
         if (engine_ == nullptr) {
             return;
         }
-        // id_ < 0 means Mozc assigned no selectable id; ignore the request.
         if (id_ < 0) {
             return;
         }
@@ -286,14 +288,20 @@ public:
             ic->commitString(std::string(
                 reinterpret_cast<const char *>(r.commit), r.commit_len));
         }
-        // Selection ends composition: clear preedit and candidate window.
-        ic->inputPanel().reset();
-        ic->updatePreedit();
-        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        // Selection ends composition: fully clean up C++ state so the tick
+        // timer stops and preedit/candidate caches are reset.
+        if (host_) {
+            host_->clearPreedit(ic);
+        } else {
+            ic->inputPanel().reset();
+            ic->updatePreedit();
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        }
     }
 
 private:
     MzkanaEngine *engine_;
+    MzkanaFcitxEngine *host_;
     int32_t id_;
 };
 
@@ -347,12 +355,14 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
 
     auto list = std::make_unique<fcitx::CommonCandidateList>();
     list->setPageSize(9);
-    list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    static const auto kSelectionKeys =
+        fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9");
+    list->setSelectionKey(kSelectionKeys);
     // Mozc's conversion/prediction window is vertical.
     list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical);
 
     for (auto &e : entries) {
-        list->append<MzkanaCandidateWord>(engine_, e.id, e.value, e.comment);
+        list->append<MzkanaCandidateWord>(engine_, this, e.id, e.value, e.comment);
     }
 
     // During conversion Mozc reports the focused index; highlight it.
@@ -370,7 +380,9 @@ bool MzkanaFcitxEngine::handleCandidateKey(fcitx::InputContext *ic,
     if (!candidateList) return false;
 
     // Number keys 1..9 select the candidate at that position on the current page.
-    int idx = key.keyListIndex(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    static const auto kSelectionKeys =
+        fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9");
+    int idx = key.keyListIndex(kSelectionKeys);
     if (idx >= 0 && idx < candidateList->size()) {
         candidateList->candidate(idx).select(ic);
         return true;
