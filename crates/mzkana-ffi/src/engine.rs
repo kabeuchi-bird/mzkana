@@ -26,6 +26,13 @@ pub struct Engine {
     /// Focused candidate index during conversion; `None` for suggestion windows or
     /// when there is no candidate window.
     focused_index: Option<u32>,
+    /// Configtool overrides: when `Some`, these take priority over the TOML
+    /// `[settings]` values. Set via `mzkana_engine_set_*` FFI calls from the
+    /// C++ `reloadConfig` / `setConfig` path; `None` means "use TOML value".
+    preedit_fallback_override: Option<PreeditFallback>,
+    on_focus_change_override: Option<OnFocusChange>,
+    candidate_page_size_override: Option<u32>,
+    show_prediction_override: Option<bool>,
 }
 
 /// Candidate prepared for the C ABI: NUL-terminated UTF-8 buffers plus the
@@ -108,6 +115,10 @@ impl Engine {
             preedit: String::new(),
             candidates: Vec::new(),
             focused_index: None,
+            preedit_fallback_override: None,
+            on_focus_change_override: None,
+            candidate_page_size_override: None,
+            show_prediction_override: None,
         })
     }
 
@@ -309,7 +320,9 @@ impl Engine {
     /// Handle focus loss (IM deactivation), honoring the `on_focus_change` setting (H3).
     /// Returns `true` if the composition was preserved (caller should not clear UI).
     pub fn focus_out_preserved(&mut self) -> bool {
-        match self.sm.settings().on_focus_change {
+        let behavior = self.on_focus_change_override
+            .unwrap_or(self.sm.settings().on_focus_change);
+        match behavior {
             OnFocusChange::Preserve => true,
             OnFocusChange::Reset => {
                 self.reset();
@@ -330,12 +343,56 @@ impl Engine {
     /// `preedit_fallback` setting as an int for the FFI/C++ layer
     /// (0 = client, 1 = panel, 2 = buffer, 3 = auto).
     pub fn preedit_fallback(&self) -> i32 {
-        match self.sm.settings().preedit_fallback {
+        let val = self.preedit_fallback_override
+            .unwrap_or(self.sm.settings().preedit_fallback);
+        match val {
             PreeditFallback::Client => 0,
             PreeditFallback::Panel => 1,
             PreeditFallback::Buffer => 2,
             PreeditFallback::Auto => 3,
         }
+    }
+
+    /// Resolved `candidate_page_size` (configtool override > TOML > default 5).
+    pub fn candidate_page_size(&self) -> i32 {
+        self.candidate_page_size_override
+            .unwrap_or(self.sm.settings().candidate_page_size) as i32
+    }
+
+    /// Resolved `show_prediction` (configtool override > TOML > default true).
+    pub fn show_prediction(&self) -> bool {
+        self.show_prediction_override
+            .unwrap_or(self.sm.settings().show_prediction)
+    }
+
+    pub fn set_preedit_fallback_override(&mut self, val: i32) {
+        self.preedit_fallback_override = match val {
+            0 => Some(PreeditFallback::Client),
+            1 => Some(PreeditFallback::Panel),
+            2 => Some(PreeditFallback::Buffer),
+            3 => Some(PreeditFallback::Auto),
+            _ => None,
+        };
+    }
+
+    pub fn set_on_focus_change_override(&mut self, val: i32) {
+        self.on_focus_change_override = match val {
+            0 => Some(OnFocusChange::Preserve),
+            1 => Some(OnFocusChange::Reset),
+            _ => None,
+        };
+    }
+
+    pub fn set_candidate_page_size_override(&mut self, val: i32) {
+        self.candidate_page_size_override = if val > 0 { Some(val as u32) } else { None };
+    }
+
+    pub fn set_show_prediction_override(&mut self, val: i32) {
+        self.show_prediction_override = match val {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        };
     }
 
     /// Translate an `OutputAction` into the Mozc op it issues, if any.
@@ -581,5 +638,54 @@ mod tests {
         let missing = Path::new("/nonexistent/does-not-exist.toml");
         assert!(!e.reload_layout_from(missing), "missing file should fail");
         assert_eq!(e.config_path, original, "config_path unchanged on failure");
+    }
+
+    #[test]
+    fn preedit_fallback_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        let toml_val = e.preedit_fallback();
+        assert_eq!(toml_val, 1, "TOML default is panel(1)");
+
+        e.set_preedit_fallback_override(2); // buffer
+        assert_eq!(e.preedit_fallback(), 2);
+
+        e.set_preedit_fallback_override(-1); // clear → back to TOML
+        assert_eq!(e.preedit_fallback(), toml_val);
+    }
+
+    #[test]
+    fn on_focus_change_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        assert!(e.focus_out_preserved(), "TOML default is preserve");
+
+        e.set_on_focus_change_override(1); // reset
+        assert!(!e.focus_out_preserved());
+
+        e.set_on_focus_change_override(-1); // clear → back to TOML
+        assert!(e.focus_out_preserved());
+    }
+
+    #[test]
+    fn candidate_page_size_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        assert_eq!(e.candidate_page_size(), 5, "TOML default is 5");
+
+        e.set_candidate_page_size_override(3);
+        assert_eq!(e.candidate_page_size(), 3);
+
+        e.set_candidate_page_size_override(0); // clear → back to TOML
+        assert_eq!(e.candidate_page_size(), 5);
+    }
+
+    #[test]
+    fn show_prediction_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        assert!(e.show_prediction(), "TOML default is true");
+
+        e.set_show_prediction_override(0); // hide
+        assert!(!e.show_prediction());
+
+        e.set_show_prediction_override(-1); // clear → back to TOML
+        assert!(e.show_prediction());
     }
 }

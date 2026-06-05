@@ -179,6 +179,62 @@ int32_t mzkana_engine_sensitive_field_behavior(const struct MzkanaEngine *engine
 int32_t mzkana_engine_preedit_fallback(const struct MzkanaEngine *engine);
 
 /**
+ * Resolved `candidate_page_size` (configtool override > TOML > default 5).
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+int32_t mzkana_engine_candidate_page_size(const struct MzkanaEngine *engine);
+
+/**
+ * Resolved `show_prediction` (1 = show, 0 = hide).
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+uint8_t mzkana_engine_show_prediction(const struct MzkanaEngine *engine);
+
+/**
+ * Set the configtool override for `preedit_fallback`.
+ * Pass -1 to clear the override (use TOML value).
+ * 0 = client, 1 = panel, 2 = buffer, 3 = auto.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_preedit_fallback(struct MzkanaEngine *engine, int32_t value);
+
+/**
+ * Set the configtool override for `on_focus_change`.
+ * Pass -1 to clear the override (use TOML value).
+ * 0 = preserve, 1 = reset.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_on_focus_change(struct MzkanaEngine *engine, int32_t value);
+
+/**
+ * Set the configtool override for `candidate_page_size`.
+ * Pass 0 to clear the override (use TOML value).
+ * Valid range: 1–9.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_candidate_page_size(struct MzkanaEngine *engine, int32_t value);
+
+/**
+ * Set the configtool override for `show_prediction`.
+ * Pass -1 to clear the override (use TOML value).
+ * 0 = hide, 1 = show.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_show_prediction(struct MzkanaEngine *engine, int32_t value);
+
+/**
  * Check whether the config file changed and reload it if so.
  *
  * Returns 1 if the config was reloaded, 0 otherwise.

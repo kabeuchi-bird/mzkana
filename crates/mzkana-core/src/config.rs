@@ -68,6 +68,8 @@ pub struct Settings {
     pub roll_over: bool,
     pub preedit_fallback: PreeditFallback,
     pub sensitive_field_behavior: SensitiveFieldBehavior,
+    pub candidate_page_size: u32,
+    pub show_prediction: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +82,8 @@ impl Default for Settings {
             roll_over: true,
             preedit_fallback: PreeditFallback::Panel,
             sensitive_field_behavior: SensitiveFieldBehavior::Passthrough,
+            candidate_page_size: 5,
+            show_prediction: true,
         }
     }
 }

@@ -55,6 +55,35 @@ void MzkanaFcitxEngine::reloadSelectedLayout() {
         engine_ = mzkana_engine_create(path.c_str(), nullptr);
     }
     mozcAvailable_ = engine_ && mzkana_engine_mozc_available(engine_);
+    applyConfigOverrides();
+}
+
+void MzkanaFcitxEngine::applyConfigOverrides() {
+    if (!engine_) return;
+
+    // preedit_fallback: FollowLayout → -1 (use TOML), Client → 0, …
+    mzkana_engine_set_preedit_fallback(
+        engine_,
+        static_cast<int>(*config_.preeditFallback) - 1);
+
+    // on_focus_change: FollowLayout → -1, Preserve → 0, Reset → 1
+    mzkana_engine_set_on_focus_change(
+        engine_,
+        static_cast<int>(*config_.onFocusChange) - 1);
+
+    // candidate_page_size: 0 = use TOML default
+    mzkana_engine_set_candidate_page_size(
+        engine_,
+        *config_.candidatePageSize);
+
+    // show_prediction: FollowLayout → -1, Show → 1, Hide → 0
+    int showPred;
+    switch (*config_.showPrediction) {
+    case ShowPredictionOption::Show:  showPred = 1;  break;
+    case ShowPredictionOption::Hide:  showPred = 0;  break;
+    default:                          showPred = -1; break;
+    }
+    mzkana_engine_set_show_prediction(engine_, showPred);
 }
 
 void MzkanaFcitxEngine::setConfig(const fcitx::RawConfig &raw) {
@@ -337,6 +366,15 @@ private:
 
 void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
     uint32_t n = mzkana_engine_candidate_count(engine_);
+    int32_t focused = mzkana_engine_focused_index(engine_);
+
+    // Suppress the prediction/suggestion window (focused == -1) when
+    // show_prediction is off. Conversion candidates (focused >= 0) are
+    // always shown — hiding them would make conversion unusable.
+    if (n > 0 && focused < 0 && !mzkana_engine_show_prediction(engine_)) {
+        n = 0;
+    }
+
     if (n == 0) {
         // No window: drop any existing candidate list (only touch the UI if there
         // is one to clear, so empty ticks stay cheap).
@@ -347,8 +385,6 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
         }
         return;
     }
-
-    int32_t focused = mzkana_engine_focused_index(engine_);
 
     // Build a signature of value/id per candidate plus the focused index. If it
     // matches the last render, the window is unchanged — skip the rebuild so the
@@ -382,7 +418,9 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
     lastCandidateSig_ = std::move(sig);
 
     auto list = std::make_unique<fcitx::CommonCandidateList>();
-    list->setPageSize(9);
+    int pageSize = mzkana_engine_candidate_page_size(engine_);
+    if (pageSize < 1 || pageSize > 9) pageSize = 5;
+    list->setPageSize(pageSize);
     static const auto kSelectionKeys =
         fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9");
     list->setSelectionKey(kSelectionKeys);

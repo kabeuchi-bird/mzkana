@@ -285,6 +285,76 @@ pub unsafe extern "C" fn mzkana_engine_preedit_fallback(engine: *const MzkanaEng
     engine.as_ref().map_or(1, |e| e.0.preedit_fallback())
 }
 
+/// Resolved `candidate_page_size` (configtool override > TOML > default 5).
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_candidate_page_size(engine: *const MzkanaEngine) -> i32 {
+    engine.as_ref().map_or(5, |e| e.0.candidate_page_size())
+}
+
+/// Resolved `show_prediction` (1 = show, 0 = hide).
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_show_prediction(engine: *const MzkanaEngine) -> u8 {
+    engine.as_ref().map_or(1, |e| e.0.show_prediction() as u8)
+}
+
+/// Set the configtool override for `preedit_fallback`.
+/// Pass -1 to clear the override (use TOML value).
+/// 0 = client, 1 = panel, 2 = buffer, 3 = auto.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_preedit_fallback(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_preedit_fallback_override(value);
+    }
+}
+
+/// Set the configtool override for `on_focus_change`.
+/// Pass -1 to clear the override (use TOML value).
+/// 0 = preserve, 1 = reset.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_on_focus_change(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_on_focus_change_override(value);
+    }
+}
+
+/// Set the configtool override for `candidate_page_size`.
+/// Pass 0 to clear the override (use TOML value).
+/// Valid range: 1–9.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_candidate_page_size(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_candidate_page_size_override(value);
+    }
+}
+
+/// Set the configtool override for `show_prediction`.
+/// Pass -1 to clear the override (use TOML value).
+/// 0 = hide, 1 = show.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_show_prediction(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_show_prediction_override(value);
+    }
+}
+
 /// Check whether the config file changed and reload it if so.
 ///
 /// Returns 1 if the config was reloaded, 0 otherwise.

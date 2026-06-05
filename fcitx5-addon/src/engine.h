@@ -74,13 +74,36 @@ struct LayoutFileAnnotation : public fcitx::EnumAnnotation {
     }
 };
 
-// Addon configuration exposed to fcitx5-configtool. Currently only the layout
-// file selection; further options (chord windows, preedit fallback, …) can be
-// added here as additional Option members.
+// Configtool enums. The first value ("FollowLayout") maps to the -1 sentinel
+// on the FFI side, meaning "no override — use the TOML [settings] value".
+enum class PreeditFallbackOption { FollowLayout, Client, Panel, Buffer, Auto };
+FCITX_CONFIG_ENUM_NAME(PreeditFallbackOption,
+    "配列設定に従う", "クライアント", "パネル", "バッファ", "自動")
+
+enum class OnFocusChangeOption { FollowLayout, Preserve, Reset };
+FCITX_CONFIG_ENUM_NAME(OnFocusChangeOption,
+    "配列設定に従う", "保持する", "リセットする")
+
+enum class ShowPredictionOption { FollowLayout, Show, Hide };
+FCITX_CONFIG_ENUM_NAME(ShowPredictionOption,
+    "配列設定に従う", "表示する", "表示しない")
+
 FCITX_CONFIGURATION(
     MzkanaConfig,
     fcitx::OptionWithAnnotation<std::string, LayoutFileAnnotation> layout{
-        this, "Layout", "配列ファイル", "layout.toml"};);
+        this, "Layout", "配列ファイル", "layout.toml"};
+    fcitx::Option<PreeditFallbackOption> preeditFallback{
+        this, "PreeditFallback", "Preedit表示方式",
+        PreeditFallbackOption::FollowLayout};
+    fcitx::Option<OnFocusChangeOption> onFocusChange{
+        this, "OnFocusChange", "フォーカス変更時の動作",
+        OnFocusChangeOption::FollowLayout};
+    fcitx::Option<int> candidatePageSize{
+        this, "CandidatePageSize",
+        "候補ページサイズ (0=配列設定に従う)", 0};
+    fcitx::Option<ShowPredictionOption> showPrediction{
+        this, "ShowPrediction", "予測候補の表示",
+        ShowPredictionOption::FollowLayout};);
 
 class MzkanaFcitxEngine : public fcitx::InputMethodEngineV2 {
 public:
@@ -128,6 +151,8 @@ private:
     std::string currentLayoutPath() const;
     // Apply config_.layout to the running engine (create or hot-swap the layout).
     void reloadSelectedLayout();
+    // Push configtool override values to the engine via FFI setters.
+    void applyConfigOverrides();
     void tryInitEngine();
     void applyResult(fcitx::InputContext *ic, const MzkanaResult &result);
     void applyCandidates(fcitx::InputContext *ic);

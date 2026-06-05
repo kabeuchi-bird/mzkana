@@ -1265,6 +1265,8 @@ show_prediction      = true    # 合成中の予測候補を表示するか
 | `roll_over` | bool | `true` | roll-over 許容（※現状は別モードとして強制せず。予約） |
 | `preedit_fallback` | enum | `"panel"` | `"client"` / `"panel"` / `"buffer"` / `"auto"`（buffer のみ特別扱い、他はパネル相当） |
 | `sensitive_field_behavior` | enum | `"passthrough"` | `"passthrough"` / `"buffer"` |
+| `candidate_page_size` | integer | 5 | 候補ウィンドウの1ページあたりの表示数（1–9） |
+| `show_prediction` | bool | `true` | 予測候補を表示するか（変換候補は常に表示） |
 
 ### `[[modifier]]`
 
@@ -1407,10 +1409,31 @@ struct LayoutFileAnnotation : public fcitx::EnumAnnotation {
     }
 };
 
+enum class PreeditFallbackOption { FollowLayout, Client, Panel, Buffer, Auto };
+FCITX_CONFIG_ENUM_NAME(PreeditFallbackOption,
+    "配列設定に従う", "クライアント", "パネル", "バッファ", "自動")
+enum class OnFocusChangeOption { FollowLayout, Preserve, Reset };
+FCITX_CONFIG_ENUM_NAME(OnFocusChangeOption,
+    "配列設定に従う", "保持する", "リセットする")
+enum class ShowPredictionOption { FollowLayout, Show, Hide };
+FCITX_CONFIG_ENUM_NAME(ShowPredictionOption,
+    "配列設定に従う", "表示する", "表示しない")
+
 FCITX_CONFIGURATION(MzkanaConfig,
     fcitx::OptionWithAnnotation<std::string, LayoutFileAnnotation>
-        layout{this, "Layout", _("配列ファイル"), "naginata-v17.toml"};
-    // 今後の項目はここに追加（chord_window_ms 等を Option<int> で公開予定）
+        layout{this, "Layout", "配列ファイル", "layout.toml"};
+    fcitx::Option<PreeditFallbackOption> preeditFallback{
+        this, "PreeditFallback", "Preedit表示方式",
+        PreeditFallbackOption::FollowLayout};
+    fcitx::Option<OnFocusChangeOption> onFocusChange{
+        this, "OnFocusChange", "フォーカス変更時の動作",
+        OnFocusChangeOption::FollowLayout};
+    fcitx::Option<int> candidatePageSize{
+        this, "CandidatePageSize",
+        "候補ページサイズ (0=配列設定に従う)", 0};
+    fcitx::Option<ShowPredictionOption> showPrediction{
+        this, "ShowPrediction", "予測候補の表示",
+        ShowPredictionOption::FollowLayout};
 );
 ```
 
@@ -1467,17 +1490,28 @@ configtool で配列を選択 → Apply
 ファイルを直接編集した場合の自動リロード（§10、notify 監視）と、configtool からの
 選択（setConfig 経由）の 2 経路が共存する。
 
+### 追加設定項目（実装済み）
+
+| 項目 | configtool での型 | FFI | 備考 |
+|---|---|---|---|
+| `preedit_fallback` | enum（配列設定に従う / クライアント / パネル / バッファ / 自動） | `set_preedit_fallback(-1…3)` | |
+| `on_focus_change` | enum（配列設定に従う / 保持する / リセットする） | `set_on_focus_change(-1…1)` | |
+| `candidate_page_size` | int（0=配列設定に従う, 1–9） | `set_candidate_page_size(0…9)` | |
+| `show_prediction` | enum（配列設定に従う / 表示する / 表示しない） | `set_show_prediction(-1…1)` | 予測候補のみ抑制、変換候補は常に表示 |
+
+### 二重管理の優先順位（確定）
+
+**configtool 設定値を優先し、「配列設定に従う」（デフォルト）選択時に TOML
+`[settings]` 値にフォールバックする。** Rust 側では各アクセサ（`preedit_fallback()`,
+`focus_out_preserved()` 等）が `*_override` フィールドを先にチェックし、`None` なら
+`sm.settings()` の値を使う。C++ の `applyConfigOverrides()` が `reloadConfig` /
+`setConfig` の都度 FFI セッタを呼んでオーバーライドを同期する。
+
 ### 今後の設定項目（候補）
 
 | 項目 | 型 | 備考 |
 |---|---|---|
-| `chord_window_ms` / `mutual_window_ms` | int | §12 の設定を GUI からも変更可能に |
-| `preedit_fallback` | enum | client/panel/buffer/auto |
-| `show_prediction` / `candidate_page_size` | bool/int | §11.5 候補表示 |
-
-> これらは TOML の `[settings]` と二重管理になり得るため、「configtool の値を
-> 既定とし、配列ファイルの `[settings]` で上書き可能」等の優先順位を実装時に決める
-> （現時点では未決）。
+| `chord_window_ms` / `mutual_window_ms` | int | §12 の設定を GUI からも変更可能に（配列の打鍵特性に密結合のため優先度低） |
 
 ---
 
@@ -1521,7 +1555,10 @@ Phase 5: 設定 GUI（§13.5、configtool 連携）  … Rust 実装済み / C++
   ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン ✓
   ├ addon .conf を Configurable=True に、getConfig/setConfig/reloadConfig 実装 ✓
   ├ FFI: mzkana_engine_reload_layout（新ファイルへ差し替え + 監視先移動）✓ 単体テスト済み
-  └ 選択即時反映（setConfig → reloadSelectedLayout）。他設定項目は順次追加
+  ├ 選択即時反映（setConfig → reloadSelectedLayout）✓
+  ├ 追加設定項目: preedit_fallback / on_focus_change / candidate_page_size /
+  │   show_prediction ✓ FFI setter + 単体テスト済み
+  └ 二重管理: configtool 優先 → 「配列設定に従う」で TOML フォールバック ✓
 ```
 
 ### 各フェーズの状況
