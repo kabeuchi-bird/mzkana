@@ -1195,7 +1195,9 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
     if (n == 0) { ic->inputPanel().setCandidateList(nullptr); return; }
 
     auto list = std::make_unique<fcitx::CommonCandidateList>();
-    list->setPageSize(9);
+    int pageSize = mzkana_engine_candidate_page_size(engine_);
+    if (pageSize < 1 || pageSize > 9) pageSize = 5;
+    list->setPageSize(pageSize);
     list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
     list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical); // Mozc 風縦型
     for (uint32_t i = 0; i < n; ++i) {
@@ -1241,8 +1243,8 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
 
 ```toml
 [settings]
-candidate_page_size  = 9       # 1 ページの候補数（既定 9）
-show_prediction      = true    # 合成中の予測候補を表示するか
+candidate_page_size  = 5       # 1 ページの候補数（既定 5、1–9）
+show_prediction      = true    # 合成中の予測候補を表示するか（変換候補は常に表示）
 ```
 
 > 実装メモ: ページング（`ConvertNextPage`=20 / `ConvertPrevPage`=21）も Mozc へ
@@ -1356,8 +1358,8 @@ mzkana/
 
 > 注: ホットリロードは独立した `reload.rs` ではなく `mzkana-ffi/src/engine.rs` 内
 > （`notify` watcher）。JSON Schema は build.rs ではなく `mzkana-cli schema`
-> サブコマンドで出力（`schemas/` ディレクトリは持たない）。設定 GUI
-> （`mzkana-config-gui` / egui）は未実装。
+> サブコマンドで出力（`schemas/` ディレクトリは持たない）。設定 GUI は独立した
+> egui アプリではなく fcitx5-configtool 連携（§13.5）で実装。
 
 ### 主要依存クレート
 
@@ -1371,8 +1373,8 @@ mzkana/
 | `tracing` | 構造化ログ |
 | `cbindgen` | C ヘッダ生成 |
 
-> 注: IPC は同期実装でワーカースレッド分離のため `tokio` は不使用。GUI 未実装のため
-> `eframe`/`egui` も不使用（設計初稿の記載を削除）。
+> 注: IPC は同期実装でワーカースレッド分離のため `tokio` は不使用。設定 GUI は
+> fcitx5-configtool 連携（§13.5）のため `eframe`/`egui` も不使用。
 
 ---
 
@@ -1385,7 +1387,8 @@ mzkana/
 ### 方針
 
 - fcitx5 addon が `fcitx::Configuration` を公開し、configtool が自動で設定 UI を生成する。
-- 当面の設定項目は **配列ファイルの選択（ドロップダウン）** のみ。他項目は今後追加。
+- 設定項目は **配列ファイルの選択（ドロップダウン）** に加え、**Preedit 表示方式**・**フォーカス変更時動作**・**候補ページサイズ**・**予測候補表示** の計 5 項目。
+- 各項目のデフォルトは「配列設定に従う」で、TOML `[settings]` の値にフォールバックする（二重管理の解決は後述）。
 - 配列ファイルの中身（グリッド・chord 等）の GUI 編集はスコープ外（TOML を直接編集）。
 
 ### 配列ファイルのドロップダウン

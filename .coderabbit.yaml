@@ -56,6 +56,8 @@ reviews:
         - 候補 FFI: 可変長候補は MzkanaResult と分離（candidate_count/_candidate/_focused_index）、候補文字列はエンジン所有の NUL 終端バッファで次キーイベントまで有効
         - 候補 id の sentinel: id 未割当は -1 で表現し、mzkana_engine_select_candidate は負 id を no-op（Mozc へ不正 SELECT_CANDIDATE を送らず UI キャッシュも誤クリアしない）
         - select_candidate/reset 後に UI キャッシュ（preedit/candidates/focused_index）が確実にクリアされ stale 状態を返さないこと
+        - configtool オーバーライド: engine.rs の *_override フィールド（Option<T>）が set_*_override セッタで正しく設定され、各アクセサ（preedit_fallback/focus_out_preserved/candidate_page_size/show_prediction）が override > TOML の優先順で値を返すこと
+        - FFI setter の sentinel 値: -1（enum 系）/ 0（candidate_page_size）で override をクリアし TOML フォールバックに戻ること
         - cbindgen.toml と実際のシグネチャが一致しているか（生成後の include/mzkana.h との差分）
 
     - path: "fcitx5-addon/src/**"
@@ -65,8 +67,13 @@ reviews:
         - 大文字キーシムの小文字正規化ロジックが正確か（FcitxKey_A–Z の範囲外を巻き込まないか）
         - applyResult: capability + preedit_fallback で表示先を分岐（対応クライアントはインライン、非対応はパネル/buffer）、sensitive 欄では preedit を出さないか
         - 候補ウィンドウ: applyCandidates が CommonCandidateList を構築（縦型・数字選択キー・focused_index で強調）、シグネチャ（value/id/annotation/focused）キャッシュで無変化時の再描画を抑制しているか
+        - 候補ページサイズ: mzkana_engine_candidate_page_size() の戻り値で setPageSize しているか（0 や範囲外は 5 にフォールバック）
+        - 予測候補抑制: show_prediction=false 時に suggestion window（focused < 0）のみ抑制し、変換候補（focused >= 0）は常に表示すること
         - 候補選択: 数字キーで select、id < 0 の候補は select しないこと
         - reset/deactivate/リロード後: clearPreedit が candidateList と署名キャッシュも含めてクリアしているか（preedit/候補の幽霊残留と ~100Hz 再構築を防ぐ）
+        - configtool 連携: MzkanaConfig の FCITX_CONFIGURATION マクロ内の Option 定義（PreeditFallbackOption/OnFocusChangeOption/ShowPredictionOption enum + int candidatePageSize）が正しく宣言されているか
+        - applyConfigOverrides: reloadSelectedLayout() 内で呼ばれ、config_ の各 Option を FFI setter に正しくマッピングしているか（enum 値 - 1 = FFI 値、FollowLayout → -1）
+        - FCITX_CONFIG_ENUM_NAME マクロの引数順序が enum 定義の順序と一致しているか
         - tick タイマー: preedit 非空の間だけ動作し、空で停止しているか
         - mzkana_engine_check_reload の呼び出しタイミング（毎キーイベント or タイマー）が適切か
         - engine_ が nullptr の場合（設定ファイル未作成時）に keyEvent でクラッシュしないか

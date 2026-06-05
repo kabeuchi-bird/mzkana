@@ -10,7 +10,8 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 - **3 キー以上の同時シフト** — 濁拗音・外来音（`ぎゃ` `ふぁ` 等）も chord で表現可能。最長一致で 2 キー部分集合（`きゃ`）から 3 キー（`ぎゃ`）へ自動アップグレード
 - **漢直サポート** — T-code / TUT-code など 2 ストローク漢字直接入力に対応
 - **投機的送信** — 入力をリアルタイムに Mozc へ送り、後から確定・書き換え（BS-rewrite）。同時打鍵は `chord_window_ms` の時間枠内のキーのみを対象に判定
-- **候補ウィンドウ** — 予測変換候補（preedit 下）と変換候補（Mozc 風縦型）を表示。数字キーで直接選択、Space/矢印で候補送り
+- **候補ウィンドウ** — 予測変換候補（preedit 下）と変換候補（Mozc 風縦型）を表示。数字キーで直接選択、Space/矢印で候補送り。予測候補の表示切替・ページサイズの変更が可能
+- **設定 GUI** — fcitx5-configtool から配列ファイル選択・表示設定・動作設定を変更でき、即座に反映（再起動不要）。TOML 配列固有設定へのフォールバック付き
 - **Mozc IPC クライアント** — Unix ドメインソケット経由で mozc_server に直接接続。起動していなければ自動起動し、切断時は次のキーイベントで自動再接続
 - **UI 非凍結保証** — Mozc IPC は専用ワーカースレッドで実行し、1 打鍵あたり 150ms のハードタイムアウトを適用。mozc_server が遅延・ハングしてもデスクトップ入力は固まりません
 - **機能キー出力** — `!Return` / `!Tab` など機能キーをグリッドや chord に埋め込み可能
@@ -138,14 +139,25 @@ fcitx5-configtool
 
 切り替えキーは fcitx5-configtool の **「グローバルオプション」→「ホットキー」** から変更できます。
 
-### 3. レイアウトファイルを選ぶ
+### 3. レイアウトファイルを選ぶ・設定を変更する
 
 `fcitx5-configtool` の **「アドオン」タブ** → `MzKana` の行の **設定（歯車）ボタン**
-を開くと、**「配列ファイル」ドロップダウン** が表示されます。
-`~/.config/fcitx5/conf/mzkana/` 配下の `*.toml` が列挙されるので、使いたい配列を
-選んで **「適用」** を押すと、その場で（fcitx5 の再起動なしに）切り替わります。
+を開くと、以下の設定項目が表示されます。
 
-> ドロップダウンに出る候補はディレクトリ走査で動的に決まります。新しい `.toml` を
+| 項目 | 説明 |
+|---|---|
+| **配列ファイル** | `~/.config/fcitx5/conf/mzkana/` 配下の `*.toml` をドロップダウンで選択 |
+| **Preedit表示方式** | 配列設定に従う / クライアント / パネル / バッファ / 自動 |
+| **フォーカス変更時の動作** | 配列設定に従う / 保持する / リセットする |
+| **候補ページサイズ** | 0（配列設定に従う）/ 1–9 |
+| **予測候補の表示** | 配列設定に従う / 表示する / 表示しない |
+
+**「適用」** を押すとその場で反映されます（fcitx5 の再起動不要）。
+
+> 「配列設定に従う」を選択すると、TOML ファイルの `[settings]` に書かれた値が使われます。
+> configtool で明示的に値を選ぶと、その値が TOML 設定より優先されます。
+
+> ドロップダウンに出る配列候補はディレクトリ走査で動的に決まります。新しい `.toml` を
 > 置いたら configtool を開き直すと一覧に反映されます。
 
 レイアウトファイルの配置方法と直接編集時の自動リロードについては、上記の
@@ -364,8 +376,11 @@ MzkanaEngine  (mzkana-core)
 - `mzkana_engine_candidate_count` / `_candidate` / `_focused_index` — 直近の Mozc 出力の候補（予測・変換）を取得（C++ が候補ウィンドウを構築）
 - `mzkana_engine_select_candidate` — 候補 id を指定して確定（数字キー選択。負 id は no-op）
 - `mzkana_engine_check_reload` — inotify でレイアウトファイルの変更を検出し自動リロード
+- `mzkana_engine_reload_layout` — configtool から選択した別の配列ファイルへ即時切替
 - `mzkana_engine_reset` — フォーカス喪失・IM 切り替え時に状態をリセット
 - `mzkana_engine_mozc_available` — Mozc 接続状態を返す（ステータスバー表示に使用）
+- `mzkana_engine_set_preedit_fallback` / `set_on_focus_change` / `set_candidate_page_size` / `set_show_prediction` — configtool のオーバーライド値を設定（-1 で TOML フォールバック）
+- `mzkana_engine_candidate_page_size` / `show_prediction` — 解決済み設定値を取得（configtool 優先、TOML フォールバック）
 
 `forward_key` / `forward_mods` は修飾キートークン（`C-z` 等）が Mozc に消費されなかった場合に設定され、C++ 層が `ic->forwardKey()` でアプリへ転送します。
 
@@ -377,7 +392,7 @@ MzkanaEngine  (mzkana-core)
 | 2 | Mozc IPC クライアント・`mozc-run` サブコマンド | ✅ 完了 |
 | 3 | Fcitx5 アドオン化（C++ シム + preedit 同期 + ホットリロード） | ✅ 完了 |
 | 4 | 候補ウィンドウ（予測・変換候補） | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
-| 5 | 設定 GUI（fcitx5-configtool 連携で配列ファイル選択） | 未着手 |
+| 5 | 設定 GUI（configtool 連携：配列選択 + 表示・動作設定 + TOML フォールバック） | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
 
 ## テスト
 
@@ -385,7 +400,7 @@ MzkanaEngine  (mzkana-core)
 cargo test
 ```
 
-105 件のテストがあります。Mozc のインストールは不要です。
+111 件のテストがあります（core: 105 件、FFI: 6 件）。Mozc のインストールは不要です。
 
 ## ライセンス
 
