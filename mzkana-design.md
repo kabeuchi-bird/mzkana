@@ -8,9 +8,10 @@ Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様�
 > かな送信は AS_IS、セッション初期化は TURN_ON_IME、BS-rewrite は preedit 文字数
 > ベース、オートリピート抑止は core 側。
 >
-> あわせて未実装の GUI 機能を設計章として追加: §11.5 候補ウィンドウ（予測・変換候補、
-> Mozc 準拠、Phase 4）、§13.5 設定 GUI（fcitx5-configtool 連携で配列ファイル選択、
-> Phase 5）。いずれも「設計検討」であり実装はこれから。
+> GUI 機能の章: §11.5 候補ウィンドウ（予測・変換候補、Mozc 準拠、Phase 4）は
+> **Rust（コア + FFI）実装済み・単体テスト済み、C++ 部分は記述済みだが fcitx5
+> 開発環境が無く未コンパイル（実機ビルド要）**。§13.5 設定 GUI（fcitx5-configtool
+> 連携で配列ファイル選択、Phase 5）は設計検討のみで未実装。
 
 ---
 
@@ -155,6 +156,21 @@ enum Output {
 | センターシフト | `Modified(Hold(K), Single(K2))` | - | - |
 
 相互シフトの本質は「どちらが先でも同じ出力」なので、`Chord` に `symmetric: true` フラグを付ければ単一ロジックで扱える。
+
+### 3 キー以上の同時シフト（最長一致 + 段階的アップグレード）
+
+`chord.keys` は 2 キーに限らず、3 キー以上の同時押し（濁拗音 `ぎゃ` = `[w,h,j]`、
+外来音 `ふぁ` = `[semicolon,j,v]` 等）も表現できる。実装は別経路を持たず、
+speculative + BS-rewrite 機構にそのまま乗る。
+
+- **最長一致**: `find_mutual_chord_match` は、すべてのキーが held で `new_key` を
+  含む symmetric chord のうち **最長のもの** を選ぶ（`max_by_key(keys.len())`）。
+- **段階的アップグレード**: `w↓` で `き`（base）→ `h↓` で `[w,h]→きゃ`（2 キー、
+  BS×1）→ `j↓` で `[w,h,j]→ぎゃ`（3 キー、BS×2 で `きゃ` を消し再送）。途中の
+  `きゃ` は確定前なので BS-rewrite で `ぎゃ` に置き換わる。完全同時押し（w h j が
+  すべて held）でも最長一致で `ぎゃ` が選ばれる。
+- 2 キー部分集合（`[w,h]→きゃ`）と 3 キー（`[w,h,j]→ぎゃ`）は共存でき、`validate`
+  でも競合扱いしない（最長一致で解決）。
 
 ---
 
@@ -508,7 +524,7 @@ roll_over             = true
 # ── Modifier 定義 ─────────────────────────────────
 [[modifier]]
 id              = "center"
-key             = "space"
+key             = "space"        # 複数キーも可: key = ["space", "henkan"]
 kind            = "hold"         # "hold" | "oneshot"
 hold_detection  = "interrupt"    # "interrupt" | "timeout"
 hold_timeout_ms = 150            # timeout 方式のみ参照
@@ -1090,7 +1106,8 @@ sensitive_field_behavior = "passthrough"
 
 ## 11.5. 候補ウィンドウ（予測・変換候補の表示）
 
-> 設計検討（未実装、Phase 4 で実装予定）。Mozc が返す候補を fcitx5 の Input Panel に
+> Phase 4。Rust（コア + FFI）実装済み・単体テスト済み、C++ 部分は記述済みだが
+> fcitx5 開発環境が無く未コンパイル（実機ビルド要）。Mozc が返す候補を fcitx5 の Input Panel に
 > 表示し、変換動作は可能な限り Mozc に倣う。
 ### 背景と現状
 
@@ -1129,7 +1146,9 @@ fcitx5-addon  : CommonCandidateList を構築し inputPanel().setCandidateList()
 pub struct Candidate {
     pub index: u32,
     pub value: String,
-    pub id: i32,                 // SELECT/HIGHLIGHT_CANDIDATE 用の Mozc 内部 id
+    pub id: Option<i32>,         // SELECT/HIGHLIGHT_CANDIDATE 用の Mozc 内部 id。
+                                 // None は「id 未割当＝選択不可」。FFI では -1 で表現し、
+                                 // C++ / select_candidate は負 id を no-op として無視する。
     pub annotation: Option<String>, // 注釈（[半][カナ] 等、description/suffix）
 }
 
@@ -1252,7 +1271,7 @@ show_prediction      = true    # 合成中の予測候補を表示するか
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `id` | string | 必須 | 識別子 |
-| `key` | string | 必須 | キー識別子 |
+| `key` | string \| array[string] | 必須 | 起動キー。単一（`"space"`）でも複数（`["space", "henkan"]`）でも可。複数指定時はいずれのキーでも同じ modifier が起動する。値は §4 の識別子（C++ の `keySymToString(key.sym())` を小文字化した形）。**bare modifier（`Shift_L` / `Control_L` 等）は C++ 側の `key.isModifier()` で除外されコアに届かないため起動キーに使えない**。空文字・空配列は読込時にエラー |
 | `kind` | enum | `"hold"` | `"hold"` / `"oneshot"` |
 | `hold_detection` | enum | `"interrupt"` | `"interrupt"` / `"timeout"` |
 | `hold_timeout_ms` | integer | 150 | timeout 方式時のみ |
@@ -1483,11 +1502,15 @@ Phase 3: fcitx5 アドオン化  … 完了
   ├ Preedit 表示分岐（インライン / パネル / buffer）+ sensitive 欄処理
   └ ホットリロード（notify、engine.rs 内）
 
-Phase 4: 候補ウィンドウ（§11.5）  … 未着手
-  ├ decode_response で candidate_window をデコード（MozcOutput に候補追加）
-  ├ FFI: mzkana_engine_candidate_count / _candidate / _focused_index
-  ├ C++: CommonCandidateList で予測（preedit 下）・変換（縦型）を描画
-  └ 変換操作キー（Space/矢印/数字/Enter/Esc）を Mozc へ転送し focused_index に追従
+Phase 4: 候補ウィンドウ（§11.5）  … Rust 実装済み / C++ は実機検証待ち
+  ├ decode_response で candidate_window をデコード（MozcOutput に candidates /
+  │   focused_index / candidate_size を追加）✓ 単体テスト済み
+  ├ FFI: mzkana_engine_candidate_count / _candidate / _focused_index /
+  │   _select_candidate（SELECT_CANDIDATE=3 を worker 経由で送信）✓
+  ├ C++: CommonCandidateList で予測（preedit 下）・変換（縦型 + focused 強調）を描画。
+  │   数字キーは直接選択、Space/矢印/Enter/Esc は Mozc へ転送し focused_index に追従。
+  │   ※ fcitx5 開発環境が無く当環境ではコンパイル未検証（実機ビルド要）
+  └ 候補文字列はエンジンが NUL 終端バッファで保持し次キーイベントまで有効
 
 Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
   ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン
@@ -1502,7 +1525,7 @@ Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
 | 1 | 4 種類の既存配列が cli で正しいかな列を出力する | ✅ 完了 |
 | 2 | cli から実際の Mozc サーバに接続して preedit/result が得られる | ✅ 完了 |
 | 3 | fcitx5 上で実用入力ができ、設定リロードが動く | ✅ 完了（実機動作確認済み） |
-| 4 | 予測・変換候補が Mozc 準拠で表示され、変換操作ができる | 未着手 |
+| 4 | 予測・変換候補が Mozc 準拠で表示され、変換操作ができる | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
 | 5 | configtool から配列ファイルを選択・即時反映できる | 未着手 |
 
 ---

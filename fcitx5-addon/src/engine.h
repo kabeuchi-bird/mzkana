@@ -5,6 +5,7 @@
 #include <fcitx/inputmethodengine.h>
 #include <fcitx/instance.h>
 #include <fcitx/inputcontext.h>
+#include <fcitx/candidatelist.h>
 #include <fcitx-utils/event.h>
 #include <fcitx-utils/trackableobject.h>
 
@@ -51,10 +52,16 @@ private:
     std::unique_ptr<fcitx::EventSourceTime> tickTimer_;
     fcitx::TrackableObjectReference<fcitx::InputContext> tickIc_;
     std::string lastPreedit_;
+    // Signature of the last-rendered candidate window (values + ids + focused
+    // index). applyCandidates rebuilds the fcitx5 list only when this changes, so
+    // the ~100 Hz tick doesn't reconstruct an identical window every frame.
+    std::string lastCandidateSig_;
 
     std::string defaultConfigPath() const;
     void tryInitEngine();
     void applyResult(fcitx::InputContext *ic, const MzkanaResult &result);
+    void applyCandidates(fcitx::InputContext *ic);
+    bool handleCandidateKey(fcitx::InputContext *ic, const fcitx::Key &key);
     void clearPreedit(fcitx::InputContext *ic);
     void updateTickTimer(bool active, fcitx::InputContext *ic);
     void onTick();

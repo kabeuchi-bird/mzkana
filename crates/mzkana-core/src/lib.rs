@@ -11,5 +11,5 @@ pub use config::{
     OnFocusChange, PreeditFallback, SensitiveFieldBehavior, Settings,
 };
 pub use error::{ConfigError, Result};
-pub use mozc::{MozcClient, MozcError, MozcOutput, MozcWorker, Op, WorkerError};
+pub use mozc::{Candidate, MozcClient, MozcError, MozcOutput, MozcWorker, Op, WorkerError};
 pub use statemachine::{InputEvent, KeyEventKind, OutputAction, StateMachine};

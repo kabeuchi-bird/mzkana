@@ -249,6 +249,38 @@ fn chord_past_window_does_not_fire() {
 }
 
 #[test]
+fn chord_at_exact_window_boundary_fires() {
+    // Boundary regression (< vs <=): the chord window is inclusive — a key arriving
+    // exactly chord_window_ms after the first must STILL form the chord. SHIN_GETA's
+    // [f,j]→を is a timed chord (symmetric=false) with the default 50 ms window.
+    // prune_expired_pending keeps pending keys while `now - ts <= window`, so the
+    // == boundary fires; a regression to `<` would drop f here and break this.
+    const WINDOW_MS: u64 = 50; // SHIN_GETA [settings] chord_window_ms
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    let a1 = m.process(InputEvent::down("f"), t0);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())));
+    // j arrives at exactly t0 + window (the inclusive boundary).
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(WINDOW_MS));
+    assert!(a2.contains(&OutputAction::Backspace), "boundary must rewrite: {a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("を".to_string())), "boundary must chord: {a2:?}");
+    assert_eq!(m.tentative_kana_string(), "を");
+}
+
+#[test]
+fn chord_one_ms_past_window_does_not_fire() {
+    // Companion to the boundary test: one millisecond past the inclusive window
+    // must NOT chord, pinning the exact `<=` semantics from both sides.
+    const WINDOW_MS: u64 = 50;
+    let mut m = sm(SHIN_GETA);
+    let t0 = Instant::now();
+    m.process(InputEvent::down("f"), t0);
+    let a2 = m.process(InputEvent::down("j"), t0 + Duration::from_millis(WINDOW_MS + 1));
+    assert!(!a2.contains(&OutputAction::SendKana("を".to_string())), "past boundary must not chord: {a2:?}");
+    assert!(m.tentative_kana_string().starts_with('き'), "got {:?}", m.tentative_kana_string());
+}
+
+#[test]
 fn chord_rewrite() {
     let mut m = sm(SHIN_GETA);
     let now = Instant::now();
@@ -421,6 +453,147 @@ fn mutual_chord_after_singles_sharing_keys() {
     assert_eq!(m.tentative_kana_string(), "あかが", "{a_ga:?}");
 }
 
+// ── 同時シフト 2 文字（拗音）: naginata-v17 の実配列で検証 ──────────────────────
+
+#[test]
+fn yoon_chord_emits_two_chars_with_one_backspace() {
+    // きゃ = w+h（w=き base, h=く base, [w,h] symmetric → きゃ）。
+    // w で投機「き」(1 文字)、h で chord 発火。H1: 書き換えは preedit 文字数ベースなので
+    // BackSpace は「き」1 文字分の 1 回のみ、出力は 2 文字「きゃ」。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    let a1 = m.process(InputEvent::down("w"), now);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())), "{a1:?}");
+    let a2 = m.process(InputEvent::down("h"), now);
+    let bs = a2.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 1, "speculative き(1 char) must be removed with exactly 1 BackSpace: {a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("きゃ".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+}
+
+#[test]
+fn consecutive_yoon_chords_keep_committed_chars() {
+    // 拗音（2 文字）を 2 連続。前の拗音は key-up で confirmed になり、次の chord に
+    // 巻き込まれない。きゃ(w+h) → きゅ(w+p)。各 chord の BackSpace は直前の投機 1 文字分のみ。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+
+    m.process(InputEvent::down("w"), now);
+    m.process(InputEvent::down("h"), now);
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+
+    let a1 = m.process(InputEvent::down("w"), now); // 次の き 投機
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())), "{a1:?}");
+    let a2 = m.process(InputEvent::down("p"), now); // きゅ chord
+    let bs = a2.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 1, "only the new speculative き should be backspaced, not committed きゃ: {a2:?}");
+    assert!(a2.contains(&OutputAction::SendKana("きゅ".to_string())), "{a2:?}");
+    assert_eq!(m.tentative_kana_string(), "きゃきゅ");
+}
+
+#[test]
+fn yoon_chord_after_single_sharing_key() {
+    // 単打かな + キーを共有する 2 文字拗音 chord。し=r(base), しゃ=r+h。
+    // し を打って確定（r key-up）後、しゃ(r+h) を打つと、確定済み「し」は巻き込まれず
+    // 「ししゃ」になる（あかが と同型を 2 文字 chord で検証）。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+
+    m.process(InputEvent::down("r"), now); // し
+    m.process(InputEvent::up("r"), now);
+    assert_eq!(m.tentative_kana_string(), "し");
+
+    m.process(InputEvent::down("r"), now); // 次の し 投機
+    let a = m.process(InputEvent::down("h"), now); // しゃ chord
+    assert!(a.contains(&OutputAction::SendKana("しゃ".to_string())), "{a:?}");
+    // 直前の投機 し(1 文字)のみ BackSpace。確定済みの先頭「し」は残る。
+    let bs = a.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 1, "committed first し must survive; only speculative し removed: {a:?}");
+    assert_eq!(m.tentative_kana_string(), "ししゃ");
+}
+
+#[test]
+fn yoon_chord_backspace_removes_both_chars() {
+    // 2 文字拗音を打った後の手動 BackSpace は preedit 2 文字分（H1）を消す。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("w"), now);
+    m.process(InputEvent::down("h"), now); // きゃ
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+
+    let bs = m.process(InputEvent::down("BackSpace"), now);
+    let n = bs.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(n, 2, "deleting a 2-char yoon must emit 2 BackSpaces: {bs:?}");
+    assert_eq!(m.tentative_kana_string(), "");
+}
+
+// ── 3 キー以上の同時シフト（最長一致 + 段階的アップグレード） ──────────────────
+
+#[test]
+fn three_key_chord_longest_match_wins() {
+    // naginata: w=き, h=く base; [w,h]→きゃ; [w,h,j]→ぎゃ。
+    // w h j を順に押すと、きゃ を投機後、3 キー目 j で ぎゃ へアップグレードする。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    let a1 = m.process(InputEvent::down("w"), now);
+    assert!(a1.contains(&OutputAction::SendKana("き".to_string())), "{a1:?}");
+    let a2 = m.process(InputEvent::down("h"), now);
+    assert!(a2.contains(&OutputAction::SendKana("きゃ".to_string())), "2-key chord first: {a2:?}");
+    // 3 キー目: きゃ(2 文字)を BS×2 で消し ぎゃ を出す。
+    let a3 = m.process(InputEvent::down("j"), now);
+    let bs = a3.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(bs, 2, "upgrading きゃ(2 chars) to ぎゃ needs 2 BackSpaces: {a3:?}");
+    assert!(a3.contains(&OutputAction::SendKana("ぎゃ".to_string())), "{a3:?}");
+    assert_eq!(m.tentative_kana_string(), "ぎゃ");
+}
+
+#[test]
+fn three_key_chord_subset_still_works() {
+    // 部分集合の 2 キー chord（[w,h]→きゃ）は 3 キーを揃えなければそのまま成立する。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("w"), now);
+    let a = m.process(InputEvent::down("h"), now);
+    assert!(a.contains(&OutputAction::SendKana("きゃ".to_string())), "{a:?}");
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    assert_eq!(m.tentative_kana_string(), "きゃ");
+}
+
+#[test]
+fn three_key_chord_simultaneous() {
+    // 完全同時押し（w h j すべて held）でも最長一致 [w,h,j]→ぎゃ が選ばれる。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("w"), now);
+    m.process(InputEvent::down("h"), now);
+    m.process(InputEvent::down("j"), now);
+    m.process(InputEvent::up("w"), now);
+    m.process(InputEvent::up("h"), now);
+    m.process(InputEvent::up("j"), now);
+    assert_eq!(m.tentative_kana_string(), "ぎゃ");
+}
+
+#[test]
+fn three_key_chord_multichar_output() {
+    // 3 キー [h,period,f]→ぐゎ（2 文字: ぐ・ゎ）。最長一致と H1（文字数ベース
+    // BS）が多文字出力でも破綻しないことを確認。
+    let mut m = StateMachine::new(load_layout(NAGINATA).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("h"), now);
+    m.process(InputEvent::down("period"), now);
+    m.process(InputEvent::down("f"), now);
+    assert_eq!(m.tentative_kana_string(), "ぐゎ");
+    // 手動 BS は 2 文字分。
+    let bs = m.process(InputEvent::down("BackSpace"), now);
+    let n = bs.iter().filter(|x| matches!(x, OutputAction::Backspace)).count();
+    assert_eq!(n, 2, "deleting ぐゎ(2 chars) must emit 2 BackSpaces: {bs:?}");
+}
+
 #[test]
 fn mutual_chord_no_timeout_after_window() {
     // symmetric=true chord fires regardless of timing — even well after chord_window_ms.
@@ -503,6 +676,190 @@ fn center_shift_modifier_layer() {
     let a = m.process(InputEvent::down("w"), now);
     // center_shift layer row1 w → め
     assert!(a.contains(&OutputAction::SendKana("め".to_string())));
+}
+
+const MULTIKEY_MODIFIER_LAYOUT: &str = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[modifier]]
+id  = "center"
+key = ["space", "Shift_R"]
+kind = "hold"
+hold_detection = "interrupt"
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+[[layer]]
+id = "shifted"
+kind = "modified"
+modifier = "center"
+grid = """
+. . q
+1 ＿ ぁ
+"""
+"#;
+
+#[test]
+fn modifier_key_accepts_array_of_keys() {
+    // `key = ["space", "Shift_R"]` parses into both activation keys.
+    let layout = load_layout(MULTIKEY_MODIFIER_LAYOUT).unwrap();
+    assert_eq!(layout.modifiers[0].keys, vec!["space".to_string(), "Shift_R".to_string()]);
+    assert!(layout.modifiers[0].matches("space"));
+    assert!(layout.modifiers[0].matches("Shift_R"));
+    assert!(!layout.modifiers[0].matches("q"));
+}
+
+#[test]
+fn multikey_modifier_activates_layer_from_any_key() {
+    // Either key in the modifier's `key` array must activate the modified layer.
+    let layout = load_layout(MULTIKEY_MODIFIER_LAYOUT).unwrap();
+    let now = Instant::now();
+    for trigger in ["space", "Shift_R"] {
+        let mut m = StateMachine::new(layout.clone());
+        m.process(InputEvent::down(trigger), now);
+        let a = m.process(InputEvent::down("q"), now);
+        assert!(
+            a.contains(&OutputAction::SendKana("ぁ".to_string())),
+            "{trigger} should activate center_shift layer: {a:?}"
+        );
+    }
+}
+
+#[test]
+fn multikey_modifier_stays_active_when_one_of_several_released() {
+    // Press both mapped keys, release ONE; the modifier must remain held because
+    // the other key is still down. Regression for per-key hold tracking.
+    let layout = load_layout(MULTIKEY_MODIFIER_LAYOUT).unwrap();
+    let now = Instant::now();
+    let mut m = StateMachine::new(layout);
+    m.process(InputEvent::down("space"), now);
+    m.process(InputEvent::down("Shift_R"), now);
+    m.process(InputEvent::up("space"), now); // release one of the two
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(
+        a.contains(&OutputAction::SendKana("ぁ".to_string())),
+        "modifier must stay active while Shift_R is still held: {a:?}"
+    );
+}
+
+#[test]
+fn modifier_empty_key_is_rejected() {
+    // `key = []`, `key = ""`, and all-blank arrays must fail to load with a clear
+    // error rather than silently creating an untriggerable modifier.
+    let base = |key: &str| format!(
+        r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[modifier]]
+id  = "m"
+key = {key}
+kind = "hold"
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+"#
+    );
+    assert!(load_layout(&base(r#""""#)).is_err(), "empty string key must be rejected");
+    assert!(load_layout(&base("[]")).is_err(), "empty array key must be rejected");
+    assert!(load_layout(&base(r#"["", " "]"#)).is_err(), "all-blank array must be rejected");
+    // A valid single key still works.
+    assert!(load_layout(&base(r#""space""#)).is_ok());
+}
+
+#[test]
+fn modifier_key_single_string_still_works() {
+    // Backward compat: `key = "space"` (a bare string) still deserializes to a
+    // single-element keys vec.
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[modifier]]
+id  = "m"
+key = "space"
+kind = "hold"
+"#;
+    let layout = load_layout(toml).unwrap();
+    assert_eq!(layout.modifiers[0].keys, vec!["space".to_string()]);
+    assert!(layout.modifiers[0].matches("space"));
+}
+
+#[test]
+fn modified_layer_resolves_alias() {
+    // Regression: a modified (center-shift) layer cell that names an alias must be
+    // expanded like the base layer — not sent to Mozc verbatim. naginata's
+    // center_shift 'v' = ku_ret = "、 !Return".
+    let mut m = sm(NAGINATA);
+    let now = Instant::now();
+    m.process(InputEvent::down("space"), now); // hold center modifier
+    let a = m.process(InputEvent::down("v"), now);
+    assert!(
+        a.contains(&OutputAction::SendKana("、".to_string())),
+        "alias must expand to its kana, not literal 'ku_ret': {a:?}"
+    );
+    assert!(
+        a.contains(&OutputAction::SendFunctionKey("Return".to_string())),
+        "alias function-key token must expand: {a:?}"
+    );
+    assert!(
+        !a.iter().any(|x| matches!(x, OutputAction::SendKana(s) if s == "ku_ret")),
+        "raw alias name must never reach Mozc: {a:?}"
+    );
+    assert_eq!(m.tentative_kana_string(), "、");
+}
+
+#[test]
+fn modified_layer_resolves_multichar_alias() {
+    // Modified-layer alias whose first token is a multi-character kana keeps the
+    // mozc_char_len bookkeeping correct (single tentative entry, 2 preedit chars).
+    let toml = r#"
+[meta]
+name = "t"
+mode = "kana"
+schema = 1
+[[alias]]
+kya_ret = "きゃ !Return"
+[[modifier]]
+id = "m"
+key = "space"
+kind = "hold"
+hold_detection = "interrupt"
+[[layer]]
+id = "base"
+kind = "single"
+grid = """
+. . q
+1 ＿ あ
+"""
+[[layer]]
+id = "shifted"
+kind = "modified"
+modifier = "m"
+grid = """
+. . q
+1 ＿ kya_ret
+"""
+"#;
+    let mut m = StateMachine::new(load_layout(toml).unwrap());
+    let now = Instant::now();
+    m.process(InputEvent::down("space"), now);
+    let a = m.process(InputEvent::down("q"), now);
+    assert!(a.contains(&OutputAction::SendKana("きゃ".to_string())), "{a:?}");
+    assert!(a.contains(&OutputAction::SendFunctionKey("Return".to_string())), "{a:?}");
+    assert_eq!(m.tentative_kana_string(), "きゃ");
 }
 
 // ── Conflict detection ────────────────────────────────────────────────────────
@@ -1438,7 +1795,10 @@ tap_output = "あ"
 
 #[cfg(test)]
 mod proto_tests {
-    use crate::mozc::proto::mozc::commands::{preedit::Segment, Output, Preedit, Result as MResult};
+    use crate::mozc::proto::mozc::commands::candidate_window::Candidate as PbCandidate;
+    use crate::mozc::proto::mozc::commands::{
+        preedit::Segment, Annotation, CandidateWindow, Output, Preedit, Result as MResult,
+    };
     use crate::mozc::proto::{decode_response, input_send_kana, Input};
     use prost::Message;
 
@@ -1479,6 +1839,116 @@ mod proto_tests {
         assert_eq!(out.result_value.as_deref(), Some("変換"));
         assert_eq!(out.preedit_text, "かな");
         assert!(out.preedit_has_highlight, "HIGHLIGHT segment should be detected");
+        // No candidate window in this output.
+        assert!(out.candidates.is_empty());
+        assert_eq!(out.focused_index, None);
+        assert_eq!(out.candidate_size, 0);
+    }
+
+    #[test]
+    fn decode_suggestion_candidates() {
+        // Suggestion window: no focused_index. Two candidates with annotations.
+        let output = Output {
+            id: Some(1),
+            preedit: Some(Preedit {
+                cursor: 0,
+                segment: vec![Segment {
+                    annotation: 1,
+                    value: "き".to_string(),
+                    value_length: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            candidate_window: Some(CandidateWindow {
+                focused_index: None,
+                size: 2,
+                position: 0,
+                candidate: vec![
+                    PbCandidate {
+                        index: 0,
+                        value: "木".to_string(),
+                        id: Some(101),
+                        annotation: None,
+                        ..Default::default()
+                    },
+                    PbCandidate {
+                        index: 1,
+                        value: "気".to_string(),
+                        id: Some(102),
+                        annotation: Some(Annotation {
+                            description: Some("[名詞]".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let out = decode_response(&output.encode_to_vec()).expect("decode failed");
+        assert_eq!(out.focused_index, None, "suggestion window has no focus");
+        assert_eq!(out.candidate_size, 2);
+        assert_eq!(out.candidates.len(), 2);
+        assert_eq!(out.candidates[0].value, "木");
+        assert_eq!(out.candidates[0].id, Some(101));
+        assert_eq!(out.candidates[0].annotation, None);
+        assert_eq!(out.candidates[1].value, "気");
+        assert_eq!(out.candidates[1].id, Some(102));
+        assert_eq!(out.candidates[1].annotation.as_deref(), Some("[名詞]"));
+    }
+
+    #[test]
+    fn decode_conversion_candidates_with_focus() {
+        // Conversion window: focused_index present.
+        let output = Output {
+            id: Some(1),
+            candidate_window: Some(CandidateWindow {
+                focused_index: Some(1),
+                size: 3,
+                position: 0,
+                candidate: vec![
+                    PbCandidate { index: 0, value: "本".to_string(), id: Some(1), ..Default::default() },
+                    PbCandidate { index: 1, value: "ほん".to_string(), id: Some(2), ..Default::default() },
+                    PbCandidate { index: 2, value: "翻".to_string(), id: Some(3), ..Default::default() },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let out = decode_response(&output.encode_to_vec()).expect("decode failed");
+        assert_eq!(out.focused_index, Some(1), "conversion window is focused");
+        assert_eq!(out.candidate_size, 3);
+        assert_eq!(out.candidates.len(), 3);
+        assert_eq!(out.candidates[1].value, "ほん");
+    }
+
+    #[test]
+    fn decode_candidate_without_id_keeps_none() {
+        // A candidate Mozc didn't assign an id to must surface as `id: None`, not 0,
+        // so the selection layer can avoid exposing a bogus id.
+        let output = Output {
+            id: Some(1),
+            candidate_window: Some(CandidateWindow {
+                focused_index: None,
+                size: 1,
+                position: 0,
+                candidate: vec![PbCandidate {
+                    index: 0,
+                    value: "予".to_string(),
+                    id: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let out = decode_response(&output.encode_to_vec()).expect("decode failed");
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(out.candidates[0].id, None, "missing id must stay None, not 0");
     }
 }
 

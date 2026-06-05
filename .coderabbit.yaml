@@ -14,18 +14,38 @@ reviews:
       instructions: |
         状態機械の核心コードです。以下の観点を重点的にレビューしてください。
         - speculative execution と BS-rewrite の一貫性（tentative_buffer と Mozc preedit の同期）
-        - chord_window_ms/mutual_window_ms のタイマー処理の正確さ
-        - pending_keys の不変条件（leakしていないか）
+        - H1 不変条件: BackSpace 回数は TentativeChar 数ではなく mozc_char_len（preedit 文字数）合計（pop_tentative 経由で統一）
+        - chord_window_ms/mutual_window_ms のタイマー処理の正確さ（timed chord は窓を強制、symmetric chord は held_keys ベースで時間非依存）
+        - 相互シフトの最長一致（find_mutual_chord_match の max_by_key）と 3 キー以上の段階的アップグレード
+        - chord 書換時に confirmed 済み（key-up でロック）文字を巻き込まないこと、chord_consumed_keys による滞留キーの再発火抑止
+        - pending_keys の不変条件（leakしていないか）、オートリピート抑止（held_keys 既存キーの再 down 無視、BackSpace/制御キーは対象外）
+        - 複数キー modifier（ModifierState.pressed_keys）: 1 キー解放で modifier が解除されないこと、tap/oneshot は最後の解放時のみ
         - kanchoku モード中に speculative 送信が発生しないこと（silent 動作）
-        - CONVERSION モード遷移時に tentative_buffer が適切にクリアされること
+        - CONVERSION モード遷移時に tentative_buffer/held_keys/chord_consumed_keys が適切にクリアされ、制御キー（space/Henkan 等）は変換継続のため Mozc へ届くこと
 
     - path: "crates/mzkana-core/src/config.rs"
       instructions: |
         設定パーサーです。以下を確認してください。
         - グリッド文字列のパース（QWERTY 行マッピング、プレースホルダセルのスキップ）
-        - 競合検出ロジック（同一 context での出力相違）
-        - serde/schemars derive の正確さ（フィールド名の snake_case 変換）
+        - 競合検出ロジック（analyze_conflicts: 多重ロールキー・base 層を覆う特殊キー・重複 chord・modifier に飲まれる chord）
+        - modifier の key フィールド: 単一文字列／文字列配列の両受理（de_string_or_vec）、空文字・空配列・全空白の拒否
+        - serde/schemars derive の正確さ（フィールド名の snake_case 変換、#[serde(rename)] の整合）
         - エラーメッセージの明確さ
+
+    - path: "crates/mzkana-core/src/mozc/proto.rs"
+      instructions: |
+        prost 生成型のラッパと Mozc protobuf のエンコード/デコードです。以下を確認してください。
+        - input_send_kana が AS_IS（preedit 直接挿入）を使うこと、セッション初期化が TURN_ON_IME であること
+        - candidate_window のデコード（focused_index の有無で変換/予測を判別、candidate id は Option<i32> で id 未割当を None として保持し 0 に潰さない）
+        - SELECT_CANDIDATE の id 指定が正しいこと
+        - EncodedInput のエンコードが encode_to_vec で一貫していること
+
+    - path: "crates/mzkana-core/src/mozc/worker.rs"
+      instructions: |
+        Mozc IPC 専用ワーカースレッドです。以下を確認してください。
+        - 1 打鍵分の Op を 1 バッチにまとめ、recv_timeout(150ms) のハードタイムアウトで UI を凍結させないこと
+        - タイムアウト/切断時の sticky-dead 化と、dead ワーカーの Drop が join せず detach すること（ハングしたスレッドで UI を再ブロックしない）
+        - apply_op が全 Op バリアントを正しくマップすること、MozcSession トレイトの実装漏れがないこと
 
     - path: "crates/mzkana-ffi/src/**"
       instructions: |
@@ -33,6 +53,9 @@ reviews:
         - Safety コメントが各 unsafe fn に付いているか
         - NULL ポインタ / 不正ポインタに対するガード（mzkana_engine_destroy(NULL) など）
         - MzkanaResult のバッファサイズ（preedit 512B / commit 512B / passthrough_key 64B）がオーバーフローしないか
+        - 候補 FFI: 可変長候補は MzkanaResult と分離（candidate_count/_candidate/_focused_index）、候補文字列はエンジン所有の NUL 終端バッファで次キーイベントまで有効
+        - 候補 id の sentinel: id 未割当は -1 で表現し、mzkana_engine_select_candidate は負 id を no-op（Mozc へ不正 SELECT_CANDIDATE を送らず UI キャッシュも誤クリアしない）
+        - select_candidate/reset 後に UI キャッシュ（preedit/candidates/focused_index）が確実にクリアされ stale 状態を返さないこと
         - cbindgen.toml と実際のシグネチャが一致しているか（生成後の include/mzkana.h との差分）
 
     - path: "fcitx5-addon/src/**"
@@ -40,8 +63,11 @@ reviews:
         Fcitx5 C++ アドオン（InputMethodEngineV2 実装）です。以下を確認してください。
         - keyEvent: Ctrl/Alt/Super/Hyper + bare modifier を正しくスキップしているか
         - 大文字キーシムの小文字正規化ロジックが正確か（FcitxKey_A–Z の範囲外を巻き込まないか）
-        - applyResult: setClientPreedit と setPreedit の両方を更新し、updatePreedit / updateUserInterface を呼んでいるか
-        - reset/deactivate: clearPreedit を必ず呼んでいるか（preedit の幽霊残留を防ぐ）
+        - applyResult: capability + preedit_fallback で表示先を分岐（対応クライアントはインライン、非対応はパネル/buffer）、sensitive 欄では preedit を出さないか
+        - 候補ウィンドウ: applyCandidates が CommonCandidateList を構築（縦型・数字選択キー・focused_index で強調）、シグネチャ（value/id/annotation/focused）キャッシュで無変化時の再描画を抑制しているか
+        - 候補選択: 数字キーで select、id < 0 の候補は select しないこと
+        - reset/deactivate/リロード後: clearPreedit が candidateList と署名キャッシュも含めてクリアしているか（preedit/候補の幽霊残留と ~100Hz 再構築を防ぐ）
+        - tick タイマー: preedit 非空の間だけ動作し、空で停止しているか
         - mzkana_engine_check_reload の呼び出しタイミング（毎キーイベント or タイマー）が適切か
         - engine_ が nullptr の場合（設定ファイル未作成時）に keyEvent でクラッシュしないか
 
@@ -57,9 +83,11 @@ reviews:
       instructions: |
         配列定義ファイルです。以下を確認してください。
         - グリッドのセル数が列ヘッダと一致しているか
-        - chord の keys が base layer に存在するキーを参照しているか
+        - chord の keys が base layer に存在するキーを参照しているか（2 キー／3 キー以上の同時シフトとも）
+        - 2 キー部分集合と 3 キー chord の共存（最長一致で解決されるため競合ではない）が意図どおりか
         - direct の sequence が重複なく定義されているか
         - mode フィールドが配列の特性に合っているか（kana/kanchoku/hybrid）
+        - 出典がある場合（nagi.kbd 等）の転記（ローマ字→かな変換）が正しいか
 
     - path: "crates/mzkana-core/src/tests.rs"
       instructions: |

@@ -10,6 +10,8 @@
 #include <fcitx/text.h>
 
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 namespace mzkana {
 
@@ -70,6 +72,15 @@ void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
 
     // Skip bare modifier key events (Shift_L, Ctrl_L, etc.)
     if (key.isModifier()) return;
+
+    // Candidate window navigation (Phase 4): when a candidate list is shown, a
+    // number key directly selects a candidate. Space/arrows/Enter fall through to
+    // normal processing — they are forwarded to Mozc, which moves its focus and
+    // returns an updated candidate window that applyCandidates() re-renders.
+    if (!keyEvent.isRelease() && handleCandidateKey(ic, key)) {
+        keyEvent.filterAndAccept();
+        return;
+    }
 
     bool shift = bool(key.states() & fcitx::KeyState::Shift);
 
@@ -210,6 +221,9 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
         lastPreedit_ = preedit;
     }
 
+    // Reflect the latest Mozc candidate window (prediction or conversion).
+    applyCandidates(ic);
+
     // Run the tick timer while a preedit is active so chord-confirm deadlines and
     // deferred compound-output tails fire even without further key input.
     updateTickTimer(!preedit.empty(), ic);
@@ -239,9 +253,140 @@ std::string MzkanaFcitxEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
     return mozcAvailable_ ? "MzKana（Mozc）" : "MzKana（変換エンジン未起動）";
 }
 
+// ── Candidate window (Phase 4) ──────────────────────────────────────────────────
+
+namespace {
+
+// A candidate backed by a Mozc-internal id. Selecting it asks the engine to
+// commit that id; the engine returns the committed text which the engine class
+// applies. The select() callback stores the id and engine pointer so it can call
+// back through the C ABI.
+class MzkanaCandidateWord : public fcitx::CandidateWord {
+public:
+    MzkanaCandidateWord(MzkanaEngine *engine, int32_t id, const std::string &text,
+                        const std::string &comment)
+        : engine_(engine), id_(id) {
+        fcitx::Text t(text);
+        setText(std::move(t));
+        if (!comment.empty()) {
+            setComment(fcitx::Text(comment));
+        }
+    }
+
+    void select(fcitx::InputContext *ic) const override {
+        if (engine_ == nullptr) {
+            return;
+        }
+        // id_ < 0 means Mozc assigned no selectable id; ignore the request.
+        if (id_ < 0) {
+            return;
+        }
+        MzkanaResult r = mzkana_engine_select_candidate(engine_, id_);
+        if (r.commit_len > 0) {
+            ic->commitString(std::string(
+                reinterpret_cast<const char *>(r.commit), r.commit_len));
+        }
+        // Selection ends composition: clear preedit and candidate window.
+        ic->inputPanel().reset();
+        ic->updatePreedit();
+        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    }
+
+private:
+    MzkanaEngine *engine_;
+    int32_t id_;
+};
+
+} // namespace
+
+void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
+    uint32_t n = mzkana_engine_candidate_count(engine_);
+    if (n == 0) {
+        // No window: drop any existing candidate list (only touch the UI if there
+        // is one to clear, so empty ticks stay cheap).
+        if (!lastCandidateSig_.empty() || ic->inputPanel().candidateList()) {
+            ic->inputPanel().setCandidateList(nullptr);
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+            lastCandidateSig_.clear();
+        }
+        return;
+    }
+
+    int32_t focused = mzkana_engine_focused_index(engine_);
+
+    // Build a signature of value/id per candidate plus the focused index. If it
+    // matches the last render, the window is unchanged — skip the rebuild so the
+    // ~100 Hz tick doesn't thrash the candidate list and panel.
+    std::string sig;
+    sig.reserve(n * 8);
+    sig += std::to_string(focused);
+    sig += '|';
+    struct Entry { std::string value, comment; int32_t id; };
+    std::vector<Entry> entries;
+    entries.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        MzkanaCandidate c = mzkana_engine_candidate(engine_, i);
+        std::string value(reinterpret_cast<const char *>(c.value), c.value_len);
+        std::string comment;
+        if (c.annotation && c.annotation_len > 0) {
+            comment.assign(reinterpret_cast<const char *>(c.annotation),
+                           c.annotation_len);
+        }
+        sig += std::to_string(c.id);
+        sig += ':';
+        sig += value;
+        sig += '\x1e';
+        sig += comment; // include annotation so changes to it trigger a rebuild
+        sig += '\x1f';
+        entries.push_back({std::move(value), std::move(comment), c.id});
+    }
+    if (sig == lastCandidateSig_) {
+        return; // unchanged — nothing to do
+    }
+    lastCandidateSig_ = std::move(sig);
+
+    auto list = std::make_unique<fcitx::CommonCandidateList>();
+    list->setPageSize(9);
+    list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    // Mozc's conversion/prediction window is vertical.
+    list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical);
+
+    for (auto &e : entries) {
+        list->append<MzkanaCandidateWord>(engine_, e.id, e.value, e.comment);
+    }
+
+    // During conversion Mozc reports the focused index; highlight it.
+    if (focused >= 0 && static_cast<uint32_t>(focused) < n) {
+        list->setGlobalCursorIndex(focused);
+    }
+
+    ic->inputPanel().setCandidateList(std::move(list));
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+}
+
+bool MzkanaFcitxEngine::handleCandidateKey(fcitx::InputContext *ic,
+                                            const fcitx::Key &key) {
+    auto candidateList = ic->inputPanel().candidateList();
+    if (!candidateList) return false;
+
+    // Number keys 1..9 select the candidate at that position on the current page.
+    int idx = key.keyListIndex(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    if (idx >= 0 && idx < candidateList->size()) {
+        candidateList->candidate(idx).select(ic);
+        return true;
+    }
+    // Space / arrows / Enter fall through to normal processing so they reach Mozc,
+    // which advances its focus and returns an updated window (re-rendered then).
+    return false;
+}
+
 void MzkanaFcitxEngine::clearPreedit(fcitx::InputContext *ic) {
     ic->inputPanel().setClientPreedit(fcitx::Text());
     ic->inputPanel().setPreedit(fcitx::Text());
+    // Also drop any candidate window and its render cache, otherwise a stale list
+    // lingers after reset/deactivate and onTick keeps rebuilding it at ~100 Hz.
+    ic->inputPanel().setCandidateList(nullptr);
+    lastCandidateSig_.clear();
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
     lastPreedit_.clear();

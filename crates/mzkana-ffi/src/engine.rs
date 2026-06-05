@@ -21,6 +21,40 @@ pub struct Engine {
     _watcher: RecommendedWatcher,
     reload_rx: mpsc::Receiver<()>,
     preedit: String,
+    /// Candidate window from the most recent Mozc output (current page), stored as
+    /// NUL-terminated UTF-8 buffers so the FFI layer can hand out C string pointers
+    /// that stay valid until the next key event. Read by the candidate accessors;
+    /// the C++ layer renders them after each key event.
+    candidates: Vec<FfiCandidate>,
+    /// Focused candidate index during conversion; `None` for suggestion windows or
+    /// when there is no candidate window.
+    focused_index: Option<u32>,
+}
+
+/// Candidate prepared for the C ABI: NUL-terminated UTF-8 buffers plus the
+/// Mozc-internal id. The trailing NUL is not counted in the returned length.
+pub struct FfiCandidate {
+    /// value bytes followed by a single NUL.
+    pub value: Vec<u8>,
+    /// annotation bytes followed by a single NUL, or `None` when absent.
+    pub annotation: Option<Vec<u8>>,
+    /// Mozc-internal candidate id, or `None` when not selectable by id.
+    pub id: Option<i32>,
+}
+
+impl FfiCandidate {
+    fn from_core(c: mzkana_core::Candidate) -> Self {
+        let with_nul = |s: String| {
+            let mut b = s.into_bytes();
+            b.push(0);
+            b
+        };
+        Self {
+            value: with_nul(c.value),
+            annotation: c.annotation.map(with_nul),
+            id: c.id,
+        }
+    }
 }
 
 impl Engine {
@@ -74,6 +108,8 @@ impl Engine {
             _watcher: watcher,
             reload_rx,
             preedit: String::new(),
+            candidates: Vec::new(),
+            focused_index: None,
         })
     }
 
@@ -141,6 +177,50 @@ impl Engine {
         self.dispatch_actions(actions, false)
     }
 
+    /// Select and commit a candidate by its Mozc-internal id (number-key / click
+    /// selection). Runs a single SELECT_CANDIDATE op on the worker, applies the
+    /// resulting commit, and resets the local composition state so the next key
+    /// starts fresh. Returns the commit (if any) for the C++ layer.
+    pub fn select_candidate(&mut self, candidate_id: i32) -> ProcessResult {
+        let mut commit: Option<String> = None;
+        let mut consumed = false;
+        if let Some(ref mut mozc) = self.mozc {
+            match mozc.batch(vec![Op::SelectCandidate(candidate_id)]) {
+                Ok(mut results) => match results.pop() {
+                    Some(Ok(out)) => {
+                        self.apply_mozc_output(out, &mut commit);
+                        consumed = true;
+                    }
+                    _ => self.mozc = None,
+                },
+                Err(WorkerError::Dead) => self.mozc = None,
+            }
+        }
+        // A committed candidate ends the composition: clear local SM state so the
+        // released chord keys / tentative buffer don't leak into the next input,
+        // and drop the cached preedit/candidates so the FFI accessors never report
+        // stale UI state (including on the Mozc-failure path).
+        self.sm.reset();
+        self.clear_ui_cache();
+        ProcessResult {
+            consumed,
+            preedit: self.preedit.clone(),
+            commit,
+            passthrough_key: None,
+            forward_key: None,
+            forward_mods: 0,
+        }
+    }
+
+    /// Drop the cached preedit and candidate window so the FFI accessors
+    /// (`candidate_count` / `focused_index` / `ProcessResult.preedit`) don't
+    /// return state left over from a finished composition.
+    fn clear_ui_cache(&mut self) {
+        self.preedit.clear();
+        self.candidates.clear();
+        self.focused_index = None;
+    }
+
     pub fn mozc_available(&self) -> bool {
         self.mozc.is_some()
     }
@@ -183,7 +263,7 @@ impl Engine {
                 self.mozc = None;
             }
         }
-        self.preedit.clear();
+        self.clear_ui_cache();
     }
 
     /// Handle focus loss (IM deactivation), honoring the `on_focus_change` setting (H3).
@@ -380,6 +460,9 @@ impl Engine {
 
     fn apply_mozc_output(&mut self, out: MozcOutput, commit: &mut Option<String>) {
         self.preedit = out.preedit;
+        // The latest output's candidate window reflects the current UI state.
+        self.candidates = out.candidates.into_iter().map(FfiCandidate::from_core).collect();
+        self.focused_index = out.focused_index;
         if let Some(result) = out.result {
             match commit {
                 Some(ref mut c) => c.push_str(&result),
@@ -391,6 +474,21 @@ impl Engine {
         } else {
             self.sm.notify_mozc_composition();
         }
+    }
+
+    /// Number of candidates in the most recent Mozc output.
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// The `i`-th prepared candidate (NUL-terminated buffers), or `None`.
+    pub fn candidate(&self, i: usize) -> Option<&FfiCandidate> {
+        self.candidates.get(i)
+    }
+
+    /// Focused candidate index during conversion, or `None`.
+    pub fn focused_index(&self) -> Option<u32> {
+        self.focused_index
     }
 }
 

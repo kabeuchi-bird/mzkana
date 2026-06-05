@@ -14,8 +14,8 @@ use std::os::unix::io::FromRawFd;
 
 use super::proto::{
     composition_mode, decode_response, input_create_session, input_delete_session,
-    input_revert, input_send_kana, input_send_key_code_with_mods, input_send_special,
-    input_send_special_with_mods, input_submit, input_turn_on_ime, special_key,
+    input_revert, input_select_candidate, input_send_kana, input_send_key_code_with_mods,
+    input_send_special, input_send_special_with_mods, input_submit, input_turn_on_ime, special_key,
     DecodedOutput,
 };
 use super::MozcOutput;
@@ -440,6 +440,12 @@ impl MozcClient {
     pub fn revert(&self) -> Result<MozcOutput, MozcError> {
         let sid = self.sid()?;
         self.dispatch(&input_revert(sid))
+    }
+
+    /// Select and commit a candidate by its Mozc-internal id (closes the window).
+    pub fn select_candidate(&self, candidate_id: i32) -> Result<MozcOutput, MozcError> {
+        let sid = self.sid()?;
+        self.dispatch(&input_select_candidate(sid, candidate_id))
     }
 
     pub fn send_space(&self) -> Result<MozcOutput, MozcError> {

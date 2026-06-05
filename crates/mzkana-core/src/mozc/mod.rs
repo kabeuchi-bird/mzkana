@@ -3,7 +3,7 @@ pub mod client;
 pub mod worker;
 
 pub use client::{connect_mozc_abstract, default_socket_path, find_abstract_socket_name, ipc_key_from_socket_name, MozcClient, MozcError};
-pub use proto::{composition_mode, DecodedOutput};
+pub use proto::{composition_mode, Candidate, DecodedOutput};
 pub use worker::{MozcWorker, Op, WorkerError};
 
 /// Decoded Mozc server response exposed to callers.
@@ -19,6 +19,12 @@ pub struct MozcOutput {
     pub mode: i32,
     /// Whether the key event was consumed by Mozc.
     pub consumed: bool,
+    /// Candidate window entries (current page). Empty when no window is shown.
+    pub candidates: Vec<Candidate>,
+    /// Focused candidate index during conversion; `None` for suggestion windows.
+    pub focused_index: Option<u32>,
+    /// Total candidate count across all pages.
+    pub candidate_size: u32,
 }
 
 impl MozcOutput {
@@ -29,6 +35,9 @@ impl MozcOutput {
             is_converting: d.preedit_has_highlight,
             mode: d.mode,
             consumed: d.consumed,
+            candidates: d.candidates,
+            focused_index: d.focused_index,
+            candidate_size: d.candidate_size,
         }
     }
 }

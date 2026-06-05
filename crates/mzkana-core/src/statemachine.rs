@@ -134,16 +134,25 @@ enum MozcMode {
 #[derive(Debug, Clone)]
 struct ModifierState {
     id: String,
-    /// True while the physical key is held down (both interrupt and timeout modes).
-    held: bool,
+    /// Physical keys of this modifier currently held down. A modifier may map to
+    /// several keys (`key = ["space", "shift"]`); the hold is active while ANY of
+    /// them is pressed, so releasing one of several does not clear the modifier.
+    pressed_keys: HashSet<String>,
     /// True when another key was pressed during the hold (interrupt-style detection).
     interrupted: bool,
-    /// When the key was pressed (for timeout detection and tap disambiguation).
+    /// When the (first) key was pressed (for timeout detection and tap disambiguation).
     pressed_at: Instant,
     /// Oneshot mode: true after press, cleared after the next non-modifier key.
     oneshot_pending: bool,
     /// Toggle mode: true when the layer is toggled on (sticky).
     toggled: bool,
+}
+
+impl ModifierState {
+    /// True while at least one of the modifier's physical keys is held.
+    fn held(&self) -> bool {
+        !self.pressed_keys.is_empty()
+    }
 }
 
 /// State of the direct trigger.
@@ -180,7 +189,7 @@ impl StateMachine {
             .iter()
             .map(|m| ModifierState {
                 id: m.id.clone(),
-                held: false,
+                pressed_keys: HashSet::new(),
                 interrupted: false,
                 pressed_at: Instant::now(),
                 oneshot_pending: false,
@@ -209,7 +218,7 @@ impl StateMachine {
         self.mozc_mode = MozcMode::Composition;
         self.chord_deadline = None;
         for ms in &mut self.modifier_states {
-            ms.held = false;
+            ms.pressed_keys.clear();
             ms.interrupted = false;
             ms.oneshot_pending = false;
             ms.toggled = false;
@@ -277,9 +286,9 @@ impl StateMachine {
         // Check if key is a modifier definition
         if let Some(idx) = self.modifier_index(key) {
             let kind = self.layout.modifiers[idx].kind;
-            self.modifier_states[idx].interrupted = false;
-            self.modifier_states[idx].pressed_at = now;
             match kind {
+                // Toggle flips sticky state on key-down and ignores release; it
+                // does not use hold tracking, so leave pressed_keys untouched.
                 ModifierKind::Toggle => {
                     self.modifier_states[idx].toggled ^= true;
                 }
@@ -287,7 +296,17 @@ impl StateMachine {
                     self.modifier_states[idx].oneshot_pending = true;
                 }
                 ModifierKind::Hold => {
-                    self.modifier_states[idx].held = true;
+                    let ms = &mut self.modifier_states[idx];
+                    // Record this physical key. pressed_at/interrupted reset only
+                    // on the first key of the modifier so a second mapped key does
+                    // not restart the hold timer. Hold activation is derived from
+                    // pressed_keys being non-empty.
+                    let was_idle = ms.pressed_keys.is_empty();
+                    ms.pressed_keys.insert(key.to_string());
+                    if was_idle {
+                        ms.interrupted = false;
+                        ms.pressed_at = now;
+                    }
                 }
             }
             return Vec::new();
@@ -300,7 +319,7 @@ impl StateMachine {
 
         // Mark modifiers as interrupted (for center-shift interrupt detection)
         for ms in &mut self.modifier_states {
-            if ms.held {
+            if ms.held() {
                 ms.interrupted = true;
             }
         }
@@ -344,14 +363,16 @@ impl StateMachine {
             if mod_output == crate::config::PASSTHROUGH_CELL {
                 return vec![OutputAction::Passthrough(key.to_string())];
             }
-            let actions = vec![OutputAction::SendKana(mod_output.clone())];
-            self.tentative_buffer.push(TentativeChar::new(
-                mod_output,
-                vec![key.to_string()],
-                None,
-                Vec::new(),
-            ));
-            return actions;
+            // Resolve aliases / multi-token sequences / function keys, same as the
+            // base layer — otherwise an alias name like "ku_ret" would be sent to
+            // Mozc verbatim instead of expanding to "、 !Return".
+            let tokens: Vec<String> = self
+                .resolve_sequence(&mod_output)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            return self.emit_sequence(&refs, vec![key.to_string()], None);
         }
 
         // Mutual chord (symmetric=true): fire immediately when all keys are held.
@@ -390,9 +411,15 @@ impl StateMachine {
                 return Vec::new();
             }
 
+            // Release this physical key. The modifier stays held while any other
+            // mapped key remains down; tap/oneshot only resolve on the LAST release.
+            self.modifier_states[idx].pressed_keys.remove(key);
+            if self.modifier_states[idx].held() {
+                return Vec::new();
+            }
+
             let was_interrupted = self.modifier_states[idx].interrupted;
             let had_oneshot = self.modifier_states[idx].oneshot_pending;
-            self.modifier_states[idx].held = false;
             self.modifier_states[idx].oneshot_pending = false;
 
             let modifier_def = self.layout.modifiers[idx].clone();
@@ -862,7 +889,7 @@ impl StateMachine {
         for (ms, mod_def) in self.modifier_states.iter().zip(self.layout.modifiers.iter()) {
             let active = if ms.oneshot_pending || ms.toggled {
                 true
-            } else if ms.held {
+            } else if ms.held() {
                 match mod_def.hold_detection {
                     HoldDetection::Timeout => {
                         now.duration_since(ms.pressed_at).as_millis() as u32
@@ -888,7 +915,7 @@ impl StateMachine {
     }
 
     fn modifier_index(&self, key: &str) -> Option<usize> {
-        self.layout.modifiers.iter().position(|m| m.key == key)
+        self.layout.modifiers.iter().position(|m| m.matches(key))
     }
 
     /// Return the mutual chord (symmetric=true) that `new_key` completes.
@@ -902,23 +929,30 @@ impl StateMachine {
     ///      is merely lingering unreleased.
     ///   2. Only if no fresh chord matches, allow a consumed partner — this is the
     ///      genuine rolling case where the shared key is held across chords
-    ///      (e.g. hold 'j', tap 'f' then 'e' → が, で).
+    ///      (e.g. hold 'j', tap 'f' then 'e' → が, で), and the longer-chord upgrade
+    ///      (e.g. (w,h)→きゃ already fired, now (w,h,j)→ぎゃ with w,h still held).
     ///
+    /// Within each pass the LONGEST chord wins, so a 3+-key chord (w,h,j) is chosen
+    /// over its 2-key subset (w,h); the speculative きゃ is then rewritten to ぎゃ.
     /// In both passes every chord key must be physically held.
     fn find_mutual_chord_match(&self, new_key: &str) -> Option<crate::config::ChordRule> {
-        let matches = |require_fresh_partners: bool| {
-            self.layout.chords.iter().find(|chord| {
-                chord.symmetric
-                    && chord.keys.iter().any(|k| k == new_key)
-                    && chord.keys.iter().all(|k| self.held_keys.contains(k))
-                    && (!require_fresh_partners
-                        || chord
-                            .keys
-                            .iter()
-                            .all(|k| k == new_key || !self.chord_consumed_keys.contains(k)))
-            })
+        let best = |require_fresh_partners: bool| {
+            self.layout
+                .chords
+                .iter()
+                .filter(|chord| {
+                    chord.symmetric
+                        && chord.keys.iter().any(|k| k == new_key)
+                        && chord.keys.iter().all(|k| self.held_keys.contains(k))
+                        && (!require_fresh_partners
+                            || chord
+                                .keys
+                                .iter()
+                                .all(|k| k == new_key || !self.chord_consumed_keys.contains(k)))
+                })
+                .max_by_key(|chord| chord.keys.len())
         };
-        matches(true).or_else(|| matches(false)).cloned()
+        best(true).or_else(|| best(false)).cloned()
     }
 
     /// Fire a mutual chord: rewrite any speculative emissions from pending chord keys,

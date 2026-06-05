@@ -7,14 +7,17 @@ Fcitx5 上で動作する、かな配列・漢直入力エンジンです。
 
 - **配列不問** — TOML 設定ファイルを差し替えるだけで任意のかな配列を使用できます
 - **6 つのシフト方式に対応** — 通常シフト / 同時シフト / 前置シフト / 後置シフト / 相互シフト / センターシフト
+- **3 キー以上の同時シフト** — 濁拗音・外来音（`ぎゃ` `ふぁ` 等）も chord で表現可能。最長一致で 2 キー部分集合（`きゃ`）から 3 キー（`ぎゃ`）へ自動アップグレード
 - **漢直サポート** — T-code / TUT-code など 2 ストローク漢字直接入力に対応
 - **投機的送信** — 入力をリアルタイムに Mozc へ送り、後から確定・書き換え（BS-rewrite）。同時打鍵は `chord_window_ms` の時間枠内のキーのみを対象に判定
+- **候補ウィンドウ** — 予測変換候補（preedit 下）と変換候補（Mozc 風縦型）を表示。数字キーで直接選択、Space/矢印で候補送り
 - **Mozc IPC クライアント** — Unix ドメインソケット経由で mozc_server に直接接続。起動していなければ自動起動し、切断時は次のキーイベントで自動再接続
 - **UI 非凍結保証** — Mozc IPC は専用ワーカースレッドで実行し、1 打鍵あたり 150ms のハードタイムアウトを適用。mozc_server が遅延・ハングしてもデスクトップ入力は固まりません
 - **機能キー出力** — `!Return` / `!Tab` など機能キーをグリッドや chord に埋め込み可能
 - **修飾キー記法** — `C-z`（Ctrl+z）/ `S-!Left`（Shift+左）などを出力トークンとして指定可能
+- **複数キー modifier** — 1 つの modifier を複数の起動キーに割り当て可能（`key = ["space", "henkan"]`）
 - **エイリアス / 複数トークン出力** — `[[alias]]` で名前付きシーケンスを定義し、グリッドや chord から参照
-- **Fcitx5 アドオン** — C++ シムレイヤー経由でインライン preedit・コミット・ホットリロードに対応
+- **Fcitx5 アドオン** — C++ シムレイヤー経由でインライン preedit・コミット・候補ウィンドウ・ホットリロードに対応
 - **Mozc ステータス表示** — Fcitx5 ステータスバーに「MzKana（Mozc）」／「MzKana（変換エンジン未起動）」を表示
 
 ## リポジトリ構成
@@ -31,13 +34,15 @@ mzkana/
 │   ├── src/engine.cpp/.h   # InputMethodEngineV2 実装
 │   ├── data/               # mzkana.conf（アドオン登録）/ mzkana-im.conf（入力メソッド登録）
 │   └── cmake/include/      # スタブエクスポートヘッダ（-dev 不要ビルド用）
-├── layouts/                # サンプル配列定義
-│   ├── tsuki-2-263.toml    # 月配列 2-263 式（前置シフト）
-│   ├── shin-geta.toml      # 新下駄配列（同時シフト）
-│   ├── naginata-v17.toml   # 薙刀式 v17（センターシフト + 相互シフト）
-│   └── t-code.toml         # T-code（漢直）
-└── schemas/                # JSON Schema（エディタ補完用）
+└── layouts/                # サンプル配列定義
+    ├── tsuki-2-263.toml    # 月配列 2-263 式（前置シフト）
+    ├── shin-geta.toml      # 新下駄配列（同時シフト）
+    ├── naginata-v17.toml   # 薙刀式 v17（センターシフト + 相互/3キー同時シフト）
+    ├── jis_x_6004.toml     # 新 JIS 配列
+    └── t-code.toml         # T-code（漢直）
 ```
+
+> JSON Schema は `mzkana-cli schema` で標準出力に生成できます（`schemas/` ディレクトリは持ちません）。
 
 ## ビルド
 
@@ -147,7 +152,11 @@ fcitx5-configtool
 cargo run -p mzkana-cli -- validate layouts/tsuki-2-263.toml
 
 # キーシーケンスを流して出力アクションを確認
+cargo run -p mzkana-cli -- run layouts/tsuki-2-263.toml --keys "a s"
+
+# 前置シフト（d w → ひ）や 3 キー同時シフト（薙刀式 ぎゃ）も確認できる
 cargo run -p mzkana-cli -- run layouts/tsuki-2-263.toml --keys "d w"
+cargo run -p mzkana-cli -- run layouts/naginata-v17.toml --keys "w+h+j"
 
 # 同時押し（+）でコードを表現
 cargo run -p mzkana-cli -- run layouts/shin-geta.toml --keys "f+j"
@@ -169,8 +178,10 @@ cargo run -p mzkana-cli -- schema
 ### `run` の出力例
 
 ```text
+# a s（単打 2 文字）
+send_kana(は)
 send_kana(か)
-send_kana(た)
+[preedit] はか
 ```
 
 ### `mozc-run` の出力例（mozc_server 起動済みの場合）
@@ -227,7 +238,7 @@ symmetric = true   # 押下順序を問わない
 # ── センターシフト（modifier）────────────────────────────────────
 [[modifier]]
 id              = "center"
-key             = "space"
+key             = "space"          # 複数キーも可: key = ["space", "henkan"]
 kind            = "hold"
 hold_detection  = "interrupt"
 tap_action      = "send_key"
@@ -336,6 +347,8 @@ MzkanaEngine  (mzkana-core)
 
 - `mzkana_engine_key_down` / `mzkana_engine_key_up` — キーイベントを処理し `MzkanaResult` を返す
 - `mzkana_engine_tick` — 内部タイマーを進める（chord 確定・期限切れ pending の除去・複合出力末尾の emit）。C++ 層が preedit 非空の間だけ約 10ms 周期の fcitx5 タイマー（`EventSourceTime`）から呼び出す
+- `mzkana_engine_candidate_count` / `_candidate` / `_focused_index` — 直近の Mozc 出力の候補（予測・変換）を取得（C++ が候補ウィンドウを構築）
+- `mzkana_engine_select_candidate` — 候補 id を指定して確定（数字キー選択。負 id は no-op）
 - `mzkana_engine_check_reload` — inotify でレイアウトファイルの変更を検出し自動リロード
 - `mzkana_engine_reset` — フォーカス喪失・IM 切り替え時に状態をリセット
 - `mzkana_engine_mozc_available` — Mozc 接続状態を返す（ステータスバー表示に使用）
@@ -349,7 +362,8 @@ MzkanaEngine  (mzkana-core)
 | 1 | 状態機械・設定パーサ・CLI（全シフト方式・漢直） | ✅ 完了 |
 | 2 | Mozc IPC クライアント・`mozc-run` サブコマンド | ✅ 完了 |
 | 3 | Fcitx5 アドオン化（C++ シム + preedit 同期 + ホットリロード） | ✅ 完了 |
-| 4 | 設定 GUI（egui） | 未着手 |
+| 4 | 候補ウィンドウ（予測・変換候補） | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
+| 5 | 設定 GUI（fcitx5-configtool 連携で配列ファイル選択） | 未着手 |
 
 ## テスト
 
@@ -357,7 +371,7 @@ MzkanaEngine  (mzkana-core)
 cargo test
 ```
 
-75 件のテストがあります。Mozc のインストールは不要です。
+105 件のテストがあります。Mozc のインストールは不要です。
 
 ## ライセンス
 

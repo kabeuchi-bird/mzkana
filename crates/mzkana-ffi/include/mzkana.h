@@ -55,6 +55,22 @@ typedef struct MzkanaResult {
 } MzkanaResult;
 
 /**
+ * One candidate entry. `value` / `annotation` are NUL-terminated UTF-8 borrowed
+ * from the engine; `annotation` is NULL when absent. `*_len` excludes the NUL.
+ */
+typedef struct MzkanaCandidate {
+  const uint8_t *value;
+  uint32_t value_len;
+  const uint8_t *annotation;
+  uint32_t annotation_len;
+  /**
+   * Mozc-internal candidate id (for SELECT_CANDIDATE), or -1 when the candidate
+   * has no id and therefore cannot be selected by id.
+   */
+  int32_t id;
+} MzkanaCandidate;
+
+/**
  * Create a new engine.
  *
  * `config_path`  — NUL-terminated UTF-8 path to the layout TOML file.
@@ -113,6 +129,17 @@ struct MzkanaResult mzkana_engine_key_up(struct MzkanaEngine *engine, const char
 struct MzkanaResult mzkana_engine_tick(struct MzkanaEngine *engine);
 
 /**
+ * Select and commit the candidate with the given Mozc-internal `candidate_id`
+ * (e.g. when the user presses a number key or clicks a candidate). The returned
+ * `MzkanaResult.commit` holds the committed text; the candidate window is closed.
+ *
+ * # Safety
+ * `engine` must be a valid non-null pointer returned by `mzkana_engine_create`.
+ */
+struct MzkanaResult mzkana_engine_select_candidate(struct MzkanaEngine *engine,
+                                                   int32_t candidate_id);
+
+/**
  * Reset engine state (call on focus loss or IM deactivation).
  * Any pending preedit is discarded.
  *
@@ -169,5 +196,32 @@ uint8_t mzkana_engine_check_reload(struct MzkanaEngine *engine);
  * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
  */
 uint8_t mzkana_engine_mozc_available(const struct MzkanaEngine *engine);
+
+/**
+ * Number of candidates in the most recent Mozc output (current page).
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+uint32_t mzkana_engine_candidate_count(const struct MzkanaEngine *engine);
+
+/**
+ * Fetch the `i`-th candidate. Returns an all-NULL/zero struct if `engine` is
+ * NULL or `i` is out of range. Strings are NUL-terminated and engine-owned;
+ * valid only until the next key event.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+struct MzkanaCandidate mzkana_engine_candidate(const struct MzkanaEngine *engine, uint32_t i);
+
+/**
+ * Focused candidate index during conversion, or -1 for a suggestion window /
+ * no window / NULL engine.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+int32_t mzkana_engine_focused_index(const struct MzkanaEngine *engine);
 
 #endif  /* MZKANA_H */

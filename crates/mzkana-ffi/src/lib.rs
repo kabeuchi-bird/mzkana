@@ -213,6 +213,26 @@ pub unsafe extern "C" fn mzkana_engine_tick(engine: *mut MzkanaEngine) -> Mzkana
     result_from(engine.0.tick())
 }
 
+/// Select and commit the candidate with the given Mozc-internal `candidate_id`
+/// (e.g. when the user presses a number key or clicks a candidate). The returned
+/// `MzkanaResult.commit` holds the committed text; the candidate window is closed.
+///
+/// # Safety
+/// `engine` must be a valid non-null pointer returned by `mzkana_engine_create`.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_select_candidate(
+    engine: *mut MzkanaEngine,
+    candidate_id: i32,
+) -> MzkanaResult {
+    // candidate_id < 0 is the "not selectable" sentinel; treat it as a no-op so it
+    // never reaches Mozc as a bogus SELECT_CANDIDATE or clears the UI caches.
+    if engine.is_null() || candidate_id < 0 {
+        return MzkanaResult::default();
+    }
+    let engine = &mut *engine;
+    result_from(engine.0.select_candidate(candidate_id))
+}
+
 /// Reset engine state (call on focus loss or IM deactivation).
 /// Any pending preedit is discarded.
 ///
@@ -285,4 +305,88 @@ pub unsafe extern "C" fn mzkana_engine_mozc_available(engine: *const MzkanaEngin
         .as_ref()
         .map(|e| e.0.mozc_available() as u8)
         .unwrap_or(0)
+}
+
+// ── Candidate window accessors (Phase 4) ───────────────────────────────────────
+//
+// The candidate list is variable-length, so it is exposed separately from the
+// fixed-size `MzkanaResult`. After each key event the C++ layer queries the
+// count and fetches each entry to (re)build the fcitx5 candidate list. All
+// returned string pointers borrow engine-owned memory that stays valid until the
+// next key event mutates the engine — the caller must copy, not retain them.
+
+/// One candidate entry. `value` / `annotation` are NUL-terminated UTF-8 borrowed
+/// from the engine; `annotation` is NULL when absent. `*_len` excludes the NUL.
+#[repr(C)]
+pub struct MzkanaCandidate {
+    pub value: *const u8,
+    pub value_len: u32,
+    pub annotation: *const u8,
+    pub annotation_len: u32,
+    /// Mozc-internal candidate id (for SELECT_CANDIDATE), or -1 when the candidate
+    /// has no id and therefore cannot be selected by id.
+    pub id: i32,
+}
+
+impl Default for MzkanaCandidate {
+    fn default() -> Self {
+        Self {
+            value: std::ptr::null(),
+            value_len: 0,
+            annotation: std::ptr::null(),
+            annotation_len: 0,
+            id: -1,
+        }
+    }
+}
+
+/// Number of candidates in the most recent Mozc output (current page).
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_candidate_count(engine: *const MzkanaEngine) -> u32 {
+    engine.as_ref().map_or(0, |e| e.0.candidate_count() as u32)
+}
+
+/// Fetch the `i`-th candidate. Returns an all-NULL/zero struct if `engine` is
+/// NULL or `i` is out of range. Strings are NUL-terminated and engine-owned;
+/// valid only until the next key event.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_candidate(
+    engine: *const MzkanaEngine,
+    i: u32,
+) -> MzkanaCandidate {
+    let Some(e) = engine.as_ref() else { return MzkanaCandidate::default() };
+    let Some(c) = e.0.candidate(i as usize) else { return MzkanaCandidate::default() };
+    // value/annotation buffers carry a trailing NUL; report length without it.
+    let (annotation, annotation_len) = match &c.annotation {
+        Some(a) => (a.as_ptr(), (a.len() - 1) as u32),
+        None => (std::ptr::null(), 0),
+    };
+    MzkanaCandidate {
+        value: c.value.as_ptr(),
+        value_len: (c.value.len() - 1) as u32,
+        annotation,
+        annotation_len,
+        // -1 signals "no selectable id"; the C++ layer must not call
+        // mzkana_engine_select_candidate for such an entry.
+        id: c.id.unwrap_or(-1),
+    }
+}
+
+/// Focused candidate index during conversion, or -1 for a suggestion window /
+/// no window / NULL engine.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_focused_index(engine: *const MzkanaEngine) -> i32 {
+    engine
+        .as_ref()
+        .and_then(|e| e.0.focused_index())
+        .map_or(-1, |i| i as i32)
 }
