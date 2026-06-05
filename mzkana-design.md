@@ -8,10 +8,10 @@ Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様�
 > かな送信は AS_IS、セッション初期化は TURN_ON_IME、BS-rewrite は preedit 文字数
 > ベース、オートリピート抑止は core 側。
 >
-> GUI 機能の章: §11.5 候補ウィンドウ（予測・変換候補、Mozc 準拠、Phase 4）は
+> GUI 機能の章: §11.5 候補ウィンドウ（予測・変換候補、Mozc 準拠、Phase 4）と
+> §13.5 設定 GUI（fcitx5-configtool 連携で配列ファイル選択、Phase 5）は、いずれも
 > **Rust（コア + FFI）実装済み・単体テスト済み、C++ 部分は記述済みだが fcitx5
-> 開発環境が無く未コンパイル（実機ビルド要）**。§13.5 設定 GUI（fcitx5-configtool
-> 連携で配列ファイル選択、Phase 5）は設計検討のみで未実装。
+> 開発環境が無く未コンパイル（実機ビルド要）**。
 
 ---
 
@@ -1376,7 +1376,7 @@ mzkana/
 
 ## 13.5. 設定 GUI（fcitx5-configtool 連携）
 
-> 設計検討（未実装、Phase 5 で実装予定）。独立した egui アプリ（旧 §13 の
+> 実装済み（Phase 5、C++ 部分は実機ビルド要）。独立した egui アプリ（旧 §13 の
 > `mzkana-config-gui`）は作らず、**fcitx5-configtool から開く標準の設定画面**として
 > 実装する。配列そのものの GUI 編集は行わない。
 
@@ -1432,9 +1432,14 @@ class MzkanaFcitxEngine : public fcitx::InputMethodEngineV2 {
 };
 ```
 
-- `reloadSelectedLayout()` は `config_.layout` のファイル名から実パスを解決し、
-  既存の `mzkana_engine_create` / リロード経路で配列を差し替える（§10 と同じく
-  Mozc preedit を revert してから差し替え）。
+- `reloadSelectedLayout()` は `config_.layout` のファイル名を
+  `~/.config/fcitx5/conf/mzkana/` 配下の実パスに解決し、FFI の
+  `mzkana_engine_reload_layout(engine, path)` を呼んで配列を差し替える。エンジン未
+  生成時（起動時にファイルが無かった場合）は `mzkana_engine_create` で生成する。
+- `mzkana_engine_reload_layout` は core 側で新ファイルをパース → 成功時のみ
+  StateMachine を差し替え（§10 と同じく Mozc preedit を revert してから差し替え）、
+  さらにホットリロード監視を新ファイルのディレクトリへ移動する。失敗時は現配列を
+  維持して `0` を返す。
 - 設定値は `~/.config/fcitx5/conf/mzkana.conf` に永続化される。
 
 ### .conf の変更
@@ -1512,9 +1517,10 @@ Phase 4: 候補ウィンドウ（§11.5）  … Rust 実装済み / C++ は実�
   │   ※ fcitx5 開発環境が無く当環境ではコンパイル未検証（実機ビルド要）
   └ 候補文字列はエンジンが NUL 終端バッファで保持し次キーイベントまで有効
 
-Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
-  ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン
-  ├ addon .conf を Configurable=True に、getConfig/setConfig/reloadConfig 実装
+Phase 5: 設定 GUI（§13.5、configtool 連携）  … Rust 実装済み / C++ は実機ビルド要
+  ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン ✓
+  ├ addon .conf を Configurable=True に、getConfig/setConfig/reloadConfig 実装 ✓
+  ├ FFI: mzkana_engine_reload_layout（新ファイルへ差し替え + 監視先移動）✓ 単体テスト済み
   └ 選択即時反映（setConfig → reloadSelectedLayout）。他設定項目は順次追加
 ```
 
@@ -1526,7 +1532,7 @@ Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
 | 2 | cli から実際の Mozc サーバに接続して preedit/result が得られる | ✅ 完了 |
 | 3 | fcitx5 上で実用入力ができ、設定リロードが動く | ✅ 完了（実機動作確認済み） |
 | 4 | 予測・変換候補が Mozc 準拠で表示され、変換操作ができる | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
-| 5 | configtool から配列ファイルを選択・即時反映できる | 未着手 |
+| 5 | configtool から配列ファイルを選択・即時反映できる | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
 
 ---
 

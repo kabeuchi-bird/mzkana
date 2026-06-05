@@ -190,6 +190,19 @@ int32_t mzkana_engine_preedit_fallback(const struct MzkanaEngine *engine);
 uint8_t mzkana_engine_check_reload(struct MzkanaEngine *engine);
 
 /**
+ * Switch to a different layout file (configtool selection, §13.5) and reload it
+ * immediately. `path` is a NUL-terminated UTF-8 path to a layout TOML file.
+ *
+ * Returns 1 on success, 0 on failure (the current layout is kept). On success
+ * the hot-reload watch is moved to the new file's directory.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ * `path` must be a valid NUL-terminated C string.
+ */
+uint8_t mzkana_engine_reload_layout(struct MzkanaEngine *engine, const char *path);
+
+/**
  * Returns 1 if the Mozc conversion engine is connected, 0 otherwise.
  *
  * Use this to determine the current engine state for UI display (e.g. status

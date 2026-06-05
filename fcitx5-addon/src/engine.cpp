@@ -3,6 +3,8 @@
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
 #include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/log.h>
+#include <fcitx-config/iniparser.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputmethodentry.h>
@@ -19,12 +21,14 @@ namespace mzkana {
 
 MzkanaFcitxEngine::MzkanaFcitxEngine(fcitx::Instance *instance)
     : instance_(instance) {
-    tryInitEngine();
+    // Load persisted settings (conf/mzkana.conf), falling back to defaults, then
+    // create the engine for the selected layout.
+    reloadConfig();
 }
 
 void MzkanaFcitxEngine::tryInitEngine() {
     if (engine_) return;
-    engine_ = mzkana_engine_create(defaultConfigPath().c_str(), nullptr);
+    engine_ = mzkana_engine_create(currentLayoutPath().c_str(), nullptr);
     // engine_ may still be null if the layout file doesn't exist yet; retry
     // on the next keyEvent or activate call.
     mozcAvailable_ = engine_ && mzkana_engine_mozc_available(engine_);
@@ -34,10 +38,34 @@ MzkanaFcitxEngine::~MzkanaFcitxEngine() {
     mzkana_engine_destroy(engine_);
 }
 
-std::string MzkanaFcitxEngine::defaultConfigPath() const {
-    const char *home = std::getenv("HOME");
-    if (!home) home = "/root";
-    return std::string(home) + "/.config/fcitx5/conf/mzkana/layout.toml";
+std::string MzkanaFcitxEngine::currentLayoutPath() const {
+    return layoutDir() + "/" + config_.layout.value();
+}
+
+// §13.5: apply the configtool selection. Hot-swaps the layout in the running
+// engine (Mozc connection preserved); creates the engine if it didn't exist yet
+// (e.g. the file was missing at startup but has since appeared).
+void MzkanaFcitxEngine::reloadSelectedLayout() {
+    const std::string path = currentLayoutPath();
+    if (engine_) {
+        if (!mzkana_engine_reload_layout(engine_, path.c_str())) {
+            FCITX_WARN() << "mzkana: failed to load layout: " << path;
+        }
+    } else {
+        engine_ = mzkana_engine_create(path.c_str(), nullptr);
+    }
+    mozcAvailable_ = engine_ && mzkana_engine_mozc_available(engine_);
+}
+
+void MzkanaFcitxEngine::setConfig(const fcitx::RawConfig &raw) {
+    config_.load(raw, true);
+    fcitx::safeSaveAsIni(config_, "conf/mzkana.conf");
+    reloadSelectedLayout();
+}
+
+void MzkanaFcitxEngine::reloadConfig() {
+    fcitx::readAsIni(config_, "conf/mzkana.conf");
+    reloadSelectedLayout();
 }
 
 void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,

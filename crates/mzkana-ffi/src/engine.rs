@@ -14,7 +14,7 @@ pub struct Engine {
     mozc_socket: Option<PathBuf>,
     mozc_retry_at: Option<Instant>,
     config_path: PathBuf,
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
     reload_rx: mpsc::Receiver<()>,
     trace_enabled: bool,
     preedit: String,
@@ -102,7 +102,7 @@ impl Engine {
             mozc_socket: socket_path.map(Path::to_path_buf),
             mozc_retry_at: None,
             config_path: config_path.to_path_buf(),
-            _watcher: watcher,
+            watcher,
             reload_rx,
             trace_enabled: std::env::var_os("MZKANA_TRACE").is_some(),
             preedit: String::new(),
@@ -144,6 +144,51 @@ impl Engine {
                 false
             }
         }
+    }
+
+    /// Switch to a different layout file (configtool selection path, §13.5) and
+    /// reload it immediately. Moves the hot-reload watch to the new file's
+    /// directory when it differs. Returns true if the new layout loaded; on
+    /// failure the current layout is kept unchanged.
+    pub fn reload_layout_from(&mut self, new_path: &Path) -> bool {
+        let layout = match std::fs::read_to_string(new_path)
+            .ok()
+            .and_then(|src| load_layout(&src).ok())
+        {
+            Some(l) => l,
+            None => {
+                tracing::warn!(
+                    "layout load failed for {}, keeping current config",
+                    new_path.display()
+                );
+                return false;
+            }
+        };
+
+        // H4: revert the in-flight composition before swapping (same rationale as
+        // check_reload — the StateMachine's tentative buffer is dropped, so the
+        // speculative kana already sent to Mozc must be reverted first).
+        self.reset();
+        self.sm = StateMachine::new(layout);
+
+        // Move the hot-reload watch to the new file's directory if it changed, so
+        // direct edits to the newly selected file are still picked up (§10).
+        let old_parent = self.config_path.parent().map(Path::to_path_buf);
+        let new_parent = new_path.parent().map(Path::to_path_buf);
+        if old_parent != new_parent {
+            if let Some(old) = old_parent.as_deref() {
+                let _ = self.watcher.unwatch(old);
+            }
+            if let Some(new) = new_parent.as_deref() {
+                if let Err(e) = self.watcher.watch(new, RecursiveMode::NonRecursive) {
+                    tracing::warn!("hot-reload re-watch failed for {}: {e}", new.display());
+                }
+            }
+        }
+
+        self.config_path = new_path.to_path_buf();
+        tracing::info!("layout switched to {}", self.config_path.display());
+        true
     }
 
     pub fn key_event(&mut self, key: &str, is_down: bool, shift: bool) -> ProcessResult {
@@ -502,4 +547,39 @@ pub struct ProcessResult {
     /// call ic->forwardKey() with this key name and the modifier bitmask.
     pub forward_key: Option<String>,
     pub forward_mods: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../layouts")
+            .join(name)
+    }
+
+    /// Build an engine without touching a real Mozc server: a bogus socket path
+    /// makes `connect` skip server auto-spawn and fail fast (mozc → None).
+    fn engine_for(layout: &str) -> Engine {
+        let bogus = Path::new("/nonexistent/mzkana-test.sock");
+        Engine::new(&layout_path(layout), Some(bogus)).expect("engine builds without Mozc")
+    }
+
+    #[test]
+    fn reload_layout_switches_to_a_different_file() {
+        let mut e = engine_for("naginata-v17.toml");
+        let target = layout_path("tsuki-2-263.toml");
+        assert!(e.reload_layout_from(&target), "valid layout should load");
+        assert_eq!(e.config_path, target, "config_path tracks the new file");
+    }
+
+    #[test]
+    fn reload_layout_keeps_current_on_failure() {
+        let mut e = engine_for("naginata-v17.toml");
+        let original = e.config_path.clone();
+        let missing = Path::new("/nonexistent/does-not-exist.toml");
+        assert!(!e.reload_layout_from(missing), "missing file should fail");
+        assert_eq!(e.config_path, original, "config_path unchanged on failure");
+    }
 }

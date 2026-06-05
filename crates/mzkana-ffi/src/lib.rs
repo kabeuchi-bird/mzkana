@@ -300,6 +300,31 @@ pub unsafe extern "C" fn mzkana_engine_check_reload(engine: *mut MzkanaEngine) -
         .unwrap_or(0)
 }
 
+/// Switch to a different layout file (configtool selection, §13.5) and reload it
+/// immediately. `path` is a NUL-terminated UTF-8 path to a layout TOML file.
+///
+/// Returns 1 on success, 0 on failure (the current layout is kept). On success
+/// the hot-reload watch is moved to the new file's directory.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+/// `path` must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_reload_layout(
+    engine: *mut MzkanaEngine,
+    path: *const c_char,
+) -> u8 {
+    if engine.is_null() || path.is_null() {
+        return 0;
+    }
+    let engine = &mut *engine;
+    let path = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    engine.0.reload_layout_from(Path::new(path)) as u8
+}
+
 /// Returns 1 if the Mozc conversion engine is connected, 0 otherwise.
 ///
 /// Use this to determine the current engine state for UI display (e.g. status

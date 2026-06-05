@@ -100,8 +100,13 @@ sudo cmake --install build
 
 ```sh
 mkdir -p ~/.config/fcitx5/conf/mzkana
-cp layouts/naginata-v17.toml ~/.config/fcitx5/conf/mzkana/layout.toml
+# 使いたい配列を必要なだけコピー（複数可）
+cp layouts/*.toml ~/.config/fcitx5/conf/mzkana/
 ```
+
+このディレクトリ配下の `*.toml` が configtool の配列ドロップダウン（後述）に列挙
+されます。どれを使うかは configtool で選択します。既定値は `layout.toml` なので、
+従来どおり 1 ファイルだけ `layout.toml` として置く運用も可能です。
 
 配置後、fcitx5 を再起動するか `fcitx5-remote -r` で再ロードしてください。
 
@@ -135,7 +140,16 @@ fcitx5-configtool
 
 ### 3. レイアウトファイルを選ぶ
 
-レイアウトファイルの配置方法と利用可能な配列については、上記の「アドオン設定ファイルの配置」と「ホットリロード」の項を参照してください。
+`fcitx5-configtool` の **「アドオン」タブ** → `MzKana` の行の **設定（歯車）ボタン**
+を開くと、**「配列ファイル」ドロップダウン** が表示されます。
+`~/.config/fcitx5/conf/mzkana/` 配下の `*.toml` が列挙されるので、使いたい配列を
+選んで **「適用」** を押すと、その場で（fcitx5 の再起動なしに）切り替わります。
+
+> ドロップダウンに出る候補はディレクトリ走査で動的に決まります。新しい `.toml` を
+> 置いたら configtool を開き直すと一覧に反映されます。
+
+レイアウトファイルの配置方法と直接編集時の自動リロードについては、上記の
+「アドオン設定ファイルの配置」と「ホットリロード」の項を参照してください。
 
 ### 4. アドオンの有効・無効を切り替える
 
