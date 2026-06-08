@@ -2209,6 +2209,44 @@ fn space_tap_sends_to_mozc_when_idle() {
     );
 }
 
+#[test]
+fn shift_arrow_during_composition_sends_modified_key() {
+    let mut m = c4_sm_composing();
+    let actions = m.process(InputEvent::down("Left").with_shift(), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::SendModifiedKey {
+            key: "Left".to_string(),
+            mods: MOD_SHIFT,
+        }),
+        "Shift+Left during composition should be SendModifiedKey, got {actions:?}"
+    );
+}
+
+#[test]
+fn shift_arrow_during_conversion_sends_modified_key() {
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion();
+    let actions = m.process(InputEvent::down("Right").with_shift(), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::SendModifiedKey {
+            key: "Right".to_string(),
+            mods: MOD_SHIFT,
+        }),
+        "Shift+Right during conversion should be SendModifiedKey for bunsetsu adjustment, got {actions:?}"
+    );
+}
+
+#[test]
+fn bare_arrow_during_conversion_sends_function_key() {
+    let mut m = c4_sm_composing();
+    m.notify_mozc_conversion();
+    let actions = m.process(InputEvent::down("Right"), Instant::now());
+    assert!(
+        actions.contains(&OutputAction::SendFunctionKey("Right".to_string())),
+        "bare Right during conversion should still be SendFunctionKey, got {actions:?}"
+    );
+}
+
 // ── H5: conflict analysis ───────────────────────────────────────────────────────
 
 #[test]

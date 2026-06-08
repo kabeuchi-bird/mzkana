@@ -479,7 +479,7 @@ impl StateMachine {
 
     // ── Speculative emit ──────────────────────────────────────────────────────
 
-    fn speculative_emit(&mut self, key: &str, _shift: bool, now: Instant) -> Vec<OutputAction> {
+    fn speculative_emit(&mut self, key: &str, shift: bool, now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
         // C1: enforce the chord window by time. Drop pending keys that are older
@@ -523,6 +523,12 @@ impl StateMachine {
                     // - Control keys (space, Return, etc.) → SendFunctionKey (send to Mozc)
                     // - Other keys → SubmitThenPassthrough (confirm preedit, then pass to app)
                     if Self::is_mozc_control_key(key) {
+                        if shift {
+                            return vec![OutputAction::SendModifiedKey {
+                                key: key.to_string(),
+                                mods: MOD_SHIFT,
+                            }];
+                        }
                         return vec![OutputAction::SendFunctionKey(key.to_string())];
                     } else {
                         // Submitting commits and clears the Mozc preedit, so drop the local
