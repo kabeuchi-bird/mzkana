@@ -130,9 +130,20 @@ public:
 
     // §13.5: configtool integration. getConfig exposes the settings schema;
     // setConfig is called on Apply; reloadConfig on external .conf changes.
+    // Addon tab uses getConfig/setConfig; Input Method page uses the
+    // *ForInputMethod variants (default returns nullptr → no gear icon).
     const fcitx::Configuration *getConfig() const override { return &config_; }
     void setConfig(const fcitx::RawConfig &raw) override;
     void reloadConfig() override;
+
+    const fcitx::Configuration *
+    getConfigForInputMethod(const fcitx::InputMethodEntry &) const override {
+        return &config_;
+    }
+    void setConfigForInputMethod(const fcitx::InputMethodEntry &,
+                                 const fcitx::RawConfig &raw) override {
+        setConfig(raw);
+    }
 
     void clearPreedit(fcitx::InputContext *ic);
 
