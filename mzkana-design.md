@@ -1478,8 +1478,11 @@ addon 登録ファイル `fcitx5-addon/data/mzkana.conf` で設定可能にす�
 Configurable=True       # ← False から変更。configtool に「設定」ボタンが出る
 ```
 
-InputMethod 登録ファイル（`mzkana-im.conf`）側は従来どおり（`Configurable` は
-addon 側で指定）。
+InputMethod 登録ファイル（`mzkana-im.conf`）側も `Configurable=True` に設定する。
+fcitx5-configtool は「入力メソッド」ページと「アドオン」タブの **2 箇所** から設定を
+開けるが、それぞれ IM conf と addon conf の `Configurable` を参照するため、両方
+`True` にしないと片方でボタンが出ない（fcitx5-rime 等の他アドオンと同じ運用）。
+どちらから開いても同じ `getConfig()` が呼ばれ同一ダイアログが表示される。
 
 ### 適用フロー
 
