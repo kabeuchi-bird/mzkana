@@ -527,9 +527,12 @@ impl Layout {
             }
         }
 
+        let mut settings = file.settings.clone();
+        settings.candidate_page_size = settings.candidate_page_size.clamp(1, 9);
+
         let layout = Layout {
             meta: file.meta.clone(),
-            settings: file.settings.clone(),
+            settings,
             modifiers: file.modifier.clone(),
             direct_trigger: file.direct_trigger.clone(),
             base_layer,

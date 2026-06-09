@@ -184,15 +184,25 @@ impl Engine {
 
         // Move the hot-reload watch to the new file's directory if it changed, so
         // direct edits to the newly selected file are still picked up (§10).
+        // Watch the new directory first; only unwatch the old one on success so
+        // a failed re-watch doesn't leave the watcher completely detached.
         let old_parent = self.config_path.parent().map(Path::to_path_buf);
         let new_parent = new_path.parent().map(Path::to_path_buf);
         if old_parent != new_parent {
-            if let Some(old) = old_parent.as_deref() {
-                let _ = self.watcher.unwatch(old);
-            }
-            if let Some(new) = new_parent.as_deref() {
-                if let Err(e) = self.watcher.watch(new, RecursiveMode::NonRecursive) {
-                    tracing::warn!("hot-reload re-watch failed for {}: {e}", new.display());
+            let watched = if let Some(new) = new_parent.as_deref() {
+                match self.watcher.watch(new, RecursiveMode::NonRecursive) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!("hot-reload re-watch failed for {}: {e}", new.display());
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if watched {
+                if let Some(old) = old_parent.as_deref() {
+                    let _ = self.watcher.unwatch(old);
                 }
             }
         }
@@ -384,7 +394,11 @@ impl Engine {
     }
 
     pub fn set_candidate_page_size_override(&mut self, val: i32) {
-        self.candidate_page_size_override = if val > 0 { Some(val as u32) } else { None };
+        self.candidate_page_size_override = if (1..=9).contains(&val) {
+            Some(val as u32)
+        } else {
+            None
+        };
     }
 
     pub fn set_show_prediction_override(&mut self, val: i32) {

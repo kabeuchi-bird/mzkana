@@ -155,13 +155,15 @@ private:
 
     std::unique_ptr<fcitx::EventSourceTime> tickTimer_;
     fcitx::TrackableObjectReference<fcitx::InputContext> tickIc_;
+    std::string lastLayoutPath_;
     std::string lastPreedit_;
     std::string lastCandidateSig_;
 
     // Full path of the layout file currently selected in config_.
     std::string currentLayoutPath() const;
     // Apply config_.layout to the running engine (create or hot-swap the layout).
-    void reloadSelectedLayout();
+    // Returns false if the layout failed to load.
+    bool reloadSelectedLayout();
     // Push configtool override values to the engine via FFI setters.
     void applyConfigOverrides();
     void tryInitEngine();

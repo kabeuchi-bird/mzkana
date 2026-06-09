@@ -45,17 +45,26 @@ std::string MzkanaFcitxEngine::currentLayoutPath() const {
 // §13.5: apply the configtool selection. Hot-swaps the layout in the running
 // engine (Mozc connection preserved); creates the engine if it didn't exist yet
 // (e.g. the file was missing at startup but has since appeared).
-void MzkanaFcitxEngine::reloadSelectedLayout() {
+bool MzkanaFcitxEngine::reloadSelectedLayout() {
     const std::string path = currentLayoutPath();
     if (engine_) {
-        if (!mzkana_engine_reload_layout(engine_, path.c_str())) {
-            FCITX_WARN() << "mzkana: failed to load layout: " << path;
+        if (path != lastLayoutPath_) {
+            if (!mzkana_engine_reload_layout(engine_, path.c_str())) {
+                FCITX_WARN() << "mzkana: failed to load layout: " << path;
+                return false;
+            }
+            lastLayoutPath_ = path;
         }
     } else {
         engine_ = mzkana_engine_create(path.c_str(), nullptr);
+        if (!engine_) {
+            return false;
+        }
+        lastLayoutPath_ = path;
     }
     mozcAvailable_ = engine_ && mzkana_engine_mozc_available(engine_);
     applyConfigOverrides();
+    return true;
 }
 
 void MzkanaFcitxEngine::applyConfigOverrides() {
@@ -87,9 +96,13 @@ void MzkanaFcitxEngine::applyConfigOverrides() {
 }
 
 void MzkanaFcitxEngine::setConfig(const fcitx::RawConfig &raw) {
+    MzkanaConfig prev = config_;
     config_.load(raw, true);
+    if (!reloadSelectedLayout()) {
+        config_ = prev;
+        return;
+    }
     fcitx::safeSaveAsIni(config_, "conf/mzkana.conf");
-    reloadSelectedLayout();
 }
 
 void MzkanaFcitxEngine::reloadConfig() {
