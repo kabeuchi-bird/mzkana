@@ -152,10 +152,13 @@ void mzkana_engine_reset(struct MzkanaEngine *engine);
  * Handle focus loss, honoring the layout's `on_focus_change` setting
  * (preserve / reset). Call from the C++ `deactivate` handler.
  *
+ * Returns 1 if the composition state was preserved (caller should NOT clear
+ * preedit), 0 if it was reset (caller should clear preedit).
+ *
  * # Safety
  * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
  */
-void mzkana_engine_focus_out(struct MzkanaEngine *engine);
+uint8_t mzkana_engine_focus_out(struct MzkanaEngine *engine);
 
 /**
  * `sensitive_field_behavior` setting (0 = passthrough, 1 = buffer).
@@ -176,6 +179,62 @@ int32_t mzkana_engine_sensitive_field_behavior(const struct MzkanaEngine *engine
 int32_t mzkana_engine_preedit_fallback(const struct MzkanaEngine *engine);
 
 /**
+ * Resolved `candidate_page_size` (configtool override > TOML > default 5).
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+int32_t mzkana_engine_candidate_page_size(const struct MzkanaEngine *engine);
+
+/**
+ * Resolved `show_prediction` (1 = show, 0 = hide).
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+uint8_t mzkana_engine_show_prediction(const struct MzkanaEngine *engine);
+
+/**
+ * Set the configtool override for `preedit_fallback`.
+ * Pass -1 to clear the override (use TOML value).
+ * 0 = client, 1 = panel, 2 = buffer, 3 = auto.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_preedit_fallback(struct MzkanaEngine *engine, int32_t value);
+
+/**
+ * Set the configtool override for `on_focus_change`.
+ * Pass -1 to clear the override (use TOML value).
+ * 0 = preserve, 1 = reset.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_on_focus_change(struct MzkanaEngine *engine, int32_t value);
+
+/**
+ * Set the configtool override for `candidate_page_size`.
+ * Pass 0 to clear the override (use TOML value).
+ * Valid range: 1–9.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_candidate_page_size(struct MzkanaEngine *engine, int32_t value);
+
+/**
+ * Set the configtool override for `show_prediction`.
+ * Pass -1 to clear the override (use TOML value).
+ * 0 = hide, 1 = show.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ */
+void mzkana_engine_set_show_prediction(struct MzkanaEngine *engine, int32_t value);
+
+/**
  * Check whether the config file changed and reload it if so.
  *
  * Returns 1 if the config was reloaded, 0 otherwise.
@@ -185,6 +244,19 @@ int32_t mzkana_engine_preedit_fallback(const struct MzkanaEngine *engine);
  * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
  */
 uint8_t mzkana_engine_check_reload(struct MzkanaEngine *engine);
+
+/**
+ * Switch to a different layout file (configtool selection, §13.5) and reload it
+ * immediately. `path` is a NUL-terminated UTF-8 path to a layout TOML file.
+ *
+ * Returns 1 on success, 0 on failure (the current layout is kept). On success
+ * the hot-reload watch is moved to the new file's directory.
+ *
+ * # Safety
+ * `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+ * `path` must be a valid NUL-terminated C string.
+ */
+uint8_t mzkana_engine_reload_layout(struct MzkanaEngine *engine, const char *path);
 
 /**
  * Returns 1 if the Mozc conversion engine is connected, 0 otherwise.

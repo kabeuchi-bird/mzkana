@@ -8,10 +8,10 @@ Fcitx5 上で動作するかな配列・漢直入力エンジンの設計仕様�
 > かな送信は AS_IS、セッション初期化は TURN_ON_IME、BS-rewrite は preedit 文字数
 > ベース、オートリピート抑止は core 側。
 >
-> GUI 機能の章: §11.5 候補ウィンドウ（予測・変換候補、Mozc 準拠、Phase 4）は
+> GUI 機能の章: §11.5 候補ウィンドウ（予測・変換候補、Mozc 準拠、Phase 4）と
+> §13.5 設定 GUI（fcitx5-configtool 連携で配列ファイル選択、Phase 5）は、いずれも
 > **Rust（コア + FFI）実装済み・単体テスト済み、C++ 部分は記述済みだが fcitx5
-> 開発環境が無く未コンパイル（実機ビルド要）**。§13.5 設定 GUI（fcitx5-configtool
-> 連携で配列ファイル選択、Phase 5）は設計検討のみで未実装。
+> 開発環境が無く未コンパイル（実機ビルド要）**。
 
 ---
 
@@ -1195,7 +1195,9 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
     if (n == 0) { ic->inputPanel().setCandidateList(nullptr); return; }
 
     auto list = std::make_unique<fcitx::CommonCandidateList>();
-    list->setPageSize(9);
+    int pageSize = mzkana_engine_candidate_page_size(engine_);
+    if (pageSize < 1 || pageSize > 9) pageSize = 5;
+    list->setPageSize(pageSize);
     list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
     list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical); // Mozc 風縦型
     for (uint32_t i = 0; i < n; ++i) {
@@ -1241,8 +1243,8 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
 
 ```toml
 [settings]
-candidate_page_size  = 9       # 1 ページの候補数（既定 9）
-show_prediction      = true    # 合成中の予測候補を表示するか
+candidate_page_size  = 5       # 1 ページの候補数（既定 5、1–9）
+show_prediction      = true    # 合成中の予測候補を表示するか（変換候補は常に表示）
 ```
 
 > 実装メモ: ページング（`ConvertNextPage`=20 / `ConvertPrevPage`=21）も Mozc へ
@@ -1265,6 +1267,8 @@ show_prediction      = true    # 合成中の予測候補を表示するか
 | `roll_over` | bool | `true` | roll-over 許容（※現状は別モードとして強制せず。予約） |
 | `preedit_fallback` | enum | `"panel"` | `"client"` / `"panel"` / `"buffer"` / `"auto"`（buffer のみ特別扱い、他はパネル相当） |
 | `sensitive_field_behavior` | enum | `"passthrough"` | `"passthrough"` / `"buffer"` |
+| `candidate_page_size` | integer | 5 | 候補ウィンドウの1ページあたりの表示数（1–9） |
+| `show_prediction` | bool | `true` | 予測候補を表示するか（変換候補は常に表示） |
 
 ### `[[modifier]]`
 
@@ -1354,8 +1358,8 @@ mzkana/
 
 > 注: ホットリロードは独立した `reload.rs` ではなく `mzkana-ffi/src/engine.rs` 内
 > （`notify` watcher）。JSON Schema は build.rs ではなく `mzkana-cli schema`
-> サブコマンドで出力（`schemas/` ディレクトリは持たない）。設定 GUI
-> （`mzkana-config-gui` / egui）は未実装。
+> サブコマンドで出力（`schemas/` ディレクトリは持たない）。設定 GUI は独立した
+> egui アプリではなく fcitx5-configtool 連携（§13.5）で実装。
 
 ### 主要依存クレート
 
@@ -1369,21 +1373,22 @@ mzkana/
 | `tracing` | 構造化ログ |
 | `cbindgen` | C ヘッダ生成 |
 
-> 注: IPC は同期実装でワーカースレッド分離のため `tokio` は不使用。GUI 未実装のため
-> `eframe`/`egui` も不使用（設計初稿の記載を削除）。
+> 注: IPC は同期実装でワーカースレッド分離のため `tokio` は不使用。設定 GUI は
+> fcitx5-configtool 連携（§13.5）のため `eframe`/`egui` も不使用。
 
 ---
 
 ## 13.5. 設定 GUI（fcitx5-configtool 連携）
 
-> 設計検討（未実装、Phase 5 で実装予定）。独立した egui アプリ（旧 §13 の
+> 実装済み（Phase 5、C++ 部分は実機ビルド要）。独立した egui アプリ（旧 §13 の
 > `mzkana-config-gui`）は作らず、**fcitx5-configtool から開く標準の設定画面**として
 > 実装する。配列そのものの GUI 編集は行わない。
 
 ### 方針
 
 - fcitx5 addon が `fcitx::Configuration` を公開し、configtool が自動で設定 UI を生成する。
-- 当面の設定項目は **配列ファイルの選択（ドロップダウン）** のみ。他項目は今後追加。
+- 設定項目は **配列ファイルの選択（ドロップダウン）** に加え、**Preedit 表示方式**・**フォーカス変更時動作**・**候補ページサイズ**・**予測候補表示** の計 5 項目。
+- 各項目のデフォルトは「配列設定に従う」で、TOML `[settings]` の値にフォールバックする（二重管理の解決は後述）。
 - 配列ファイルの中身（グリッド・chord 等）の GUI 編集はスコープ外（TOML を直接編集）。
 
 ### 配列ファイルのドロップダウン
@@ -1407,10 +1412,31 @@ struct LayoutFileAnnotation : public fcitx::EnumAnnotation {
     }
 };
 
+enum class PreeditFallbackOption { FollowLayout, Client, Panel, Buffer, Auto };
+FCITX_CONFIG_ENUM_NAME(PreeditFallbackOption,
+    "配列設定に従う", "クライアント", "パネル", "バッファ", "自動")
+enum class OnFocusChangeOption { FollowLayout, Preserve, Reset };
+FCITX_CONFIG_ENUM_NAME(OnFocusChangeOption,
+    "配列設定に従う", "保持する", "リセットする")
+enum class ShowPredictionOption { FollowLayout, Show, Hide };
+FCITX_CONFIG_ENUM_NAME(ShowPredictionOption,
+    "配列設定に従う", "表示する", "表示しない")
+
 FCITX_CONFIGURATION(MzkanaConfig,
     fcitx::OptionWithAnnotation<std::string, LayoutFileAnnotation>
-        layout{this, "Layout", _("配列ファイル"), "naginata-v17.toml"};
-    // 今後の項目はここに追加（chord_window_ms 等を Option<int> で公開予定）
+        layout{this, "Layout", "配列ファイル", "layout.toml"};
+    fcitx::Option<PreeditFallbackOption> preeditFallback{
+        this, "PreeditFallback", "Preedit表示方式",
+        PreeditFallbackOption::FollowLayout};
+    fcitx::Option<OnFocusChangeOption> onFocusChange{
+        this, "OnFocusChange", "フォーカス変更時の動作",
+        OnFocusChangeOption::FollowLayout};
+    fcitx::Option<int> candidatePageSize{
+        this, "CandidatePageSize",
+        "候補ページサイズ (0=配列設定に従う)", 0};
+    fcitx::Option<ShowPredictionOption> showPrediction{
+        this, "ShowPrediction", "予測候補の表示",
+        ShowPredictionOption::FollowLayout};
 );
 ```
 
@@ -1432,9 +1458,14 @@ class MzkanaFcitxEngine : public fcitx::InputMethodEngineV2 {
 };
 ```
 
-- `reloadSelectedLayout()` は `config_.layout` のファイル名から実パスを解決し、
-  既存の `mzkana_engine_create` / リロード経路で配列を差し替える（§10 と同じく
-  Mozc preedit を revert してから差し替え）。
+- `reloadSelectedLayout()` は `config_.layout` のファイル名を
+  `~/.config/fcitx5/conf/mzkana/` 配下の実パスに解決し、FFI の
+  `mzkana_engine_reload_layout(engine, path)` を呼んで配列を差し替える。エンジン未
+  生成時（起動時にファイルが無かった場合）は `mzkana_engine_create` で生成する。
+- `mzkana_engine_reload_layout` は core 側で新ファイルをパース → 成功時のみ
+  StateMachine を差し替え（§10 と同じく Mozc preedit を revert してから差し替え）、
+  さらにホットリロード監視を新ファイルのディレクトリへ移動する。失敗時は現配列を
+  維持して `0` を返す。
 - 設定値は `~/.config/fcitx5/conf/mzkana.conf` に永続化される。
 
 ### .conf の変更
@@ -1447,8 +1478,11 @@ addon 登録ファイル `fcitx5-addon/data/mzkana.conf` で設定可能にす�
 Configurable=True       # ← False から変更。configtool に「設定」ボタンが出る
 ```
 
-InputMethod 登録ファイル（`mzkana-im.conf`）側は従来どおり（`Configurable` は
-addon 側で指定）。
+InputMethod 登録ファイル（`mzkana-im.conf`）側も `Configurable=True` に設定する。
+fcitx5-configtool は「入力メソッド」ページと「アドオン」タブの **2 箇所** から設定を
+開けるが、それぞれ IM conf と addon conf の `Configurable` を参照するため、両方
+`True` にしないと片方でボタンが出ない（fcitx5-rime 等の他アドオンと同じ運用）。
+どちらから開いても同じ `getConfig()` が呼ばれ同一ダイアログが表示される。
 
 ### 適用フロー
 
@@ -1462,17 +1496,28 @@ configtool で配列を選択 → Apply
 ファイルを直接編集した場合の自動リロード（§10、notify 監視）と、configtool からの
 選択（setConfig 経由）の 2 経路が共存する。
 
+### 追加設定項目（実装済み）
+
+| 項目 | configtool での型 | FFI | 備考 |
+|---|---|---|---|
+| `preedit_fallback` | enum（配列設定に従う / クライアント / パネル / バッファ / 自動） | `set_preedit_fallback(-1…3)` | |
+| `on_focus_change` | enum（配列設定に従う / 保持する / リセットする） | `set_on_focus_change(-1…1)` | |
+| `candidate_page_size` | int（0=配列設定に従う, 1–9） | `set_candidate_page_size(0…9)` | |
+| `show_prediction` | enum（配列設定に従う / 表示する / 表示しない） | `set_show_prediction(-1…1)` | 予測候補のみ抑制、変換候補は常に表示 |
+
+### 二重管理の優先順位（確定）
+
+**configtool 設定値を優先し、「配列設定に従う」（デフォルト）選択時に TOML
+`[settings]` 値にフォールバックする。** Rust 側では各アクセサ（`preedit_fallback()`,
+`focus_out_preserved()` 等）が `*_override` フィールドを先にチェックし、`None` なら
+`sm.settings()` の値を使う。C++ の `applyConfigOverrides()` が `reloadConfig` /
+`setConfig` の都度 FFI セッタを呼んでオーバーライドを同期する。
+
 ### 今後の設定項目（候補）
 
 | 項目 | 型 | 備考 |
 |---|---|---|
-| `chord_window_ms` / `mutual_window_ms` | int | §12 の設定を GUI からも変更可能に |
-| `preedit_fallback` | enum | client/panel/buffer/auto |
-| `show_prediction` / `candidate_page_size` | bool/int | §11.5 候補表示 |
-
-> これらは TOML の `[settings]` と二重管理になり得るため、「configtool の値を
-> 既定とし、配列ファイルの `[settings]` で上書き可能」等の優先順位を実装時に決める
-> （現時点では未決）。
+| `chord_window_ms` / `mutual_window_ms` | int | §12 の設定を GUI からも変更可能に（配列の打鍵特性に密結合のため優先度低） |
 
 ---
 
@@ -1512,10 +1557,14 @@ Phase 4: 候補ウィンドウ（§11.5）  … Rust 実装済み / C++ は実�
   │   ※ fcitx5 開発環境が無く当環境ではコンパイル未検証（実機ビルド要）
   └ 候補文字列はエンジンが NUL 終端バッファで保持し次キーイベントまで有効
 
-Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
-  ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン
-  ├ addon .conf を Configurable=True に、getConfig/setConfig/reloadConfig 実装
-  └ 選択即時反映（setConfig → reloadSelectedLayout）。他設定項目は順次追加
+Phase 5: 設定 GUI（§13.5、configtool 連携）  … Rust 実装済み / C++ は実機ビルド要
+  ├ fcitx::Configuration + EnumAnnotation で配列ファイルのドロップダウン ✓
+  ├ addon .conf を Configurable=True に、getConfig/setConfig/reloadConfig 実装 ✓
+  ├ FFI: mzkana_engine_reload_layout（新ファイルへ差し替え + 監視先移動）✓ 単体テスト済み
+  ├ 選択即時反映（setConfig → reloadSelectedLayout）✓
+  ├ 追加設定項目: preedit_fallback / on_focus_change / candidate_page_size /
+  │   show_prediction ✓ FFI setter + 単体テスト済み
+  └ 二重管理: configtool 優先 → 「配列設定に従う」で TOML フォールバック ✓
 ```
 
 ### 各フェーズの状況
@@ -1526,7 +1575,7 @@ Phase 5: 設定 GUI（§13.5、configtool 連携）  … 未着手
 | 2 | cli から実際の Mozc サーバに接続して preedit/result が得られる | ✅ 完了 |
 | 3 | fcitx5 上で実用入力ができ、設定リロードが動く | ✅ 完了（実機動作確認済み） |
 | 4 | 予測・変換候補が Mozc 準拠で表示され、変換操作ができる | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
-| 5 | configtool から配列ファイルを選択・即時反映できる | 未着手 |
+| 5 | configtool から配列ファイルを選択・即時反映できる | Rust 実装済み（テスト済み）/ C++ 実機ビルド要 |
 
 ---
 

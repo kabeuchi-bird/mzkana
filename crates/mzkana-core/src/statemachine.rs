@@ -479,7 +479,7 @@ impl StateMachine {
 
     // ── Speculative emit ──────────────────────────────────────────────────────
 
-    fn speculative_emit(&mut self, key: &str, _shift: bool, now: Instant) -> Vec<OutputAction> {
+    fn speculative_emit(&mut self, key: &str, shift: bool, now: Instant) -> Vec<OutputAction> {
         let mut actions = Vec::new();
 
         // C1: enforce the chord window by time. Drop pending keys that are older
@@ -523,6 +523,12 @@ impl StateMachine {
                     // - Control keys (space, Return, etc.) → SendFunctionKey (send to Mozc)
                     // - Other keys → SubmitThenPassthrough (confirm preedit, then pass to app)
                     if Self::is_mozc_control_key(key) {
+                        if shift {
+                            return vec![OutputAction::SendModifiedKey {
+                                key: key.to_string(),
+                                mods: MOD_SHIFT,
+                            }];
+                        }
                         return vec![OutputAction::SendFunctionKey(key.to_string())];
                     } else {
                         // Submitting commits and clears the Mozc preedit, so drop the local
@@ -740,33 +746,31 @@ impl StateMachine {
         let pending: Vec<String> = self.pending_keys.iter().map(|(k, _)| k.clone()).collect();
 
         // Check for complete match
-        for rule in &self.layout.directs.clone() {
-            if rule.sequence == pending {
-                let output = rule.output.clone();
-                self.pending_keys.clear();
+        let matched_output = (0..self.layout.directs.len())
+            .find(|&i| self.layout.directs[i].sequence == pending)
+            .map(|i| self.layout.directs[i].output.clone());
+        if let Some(output) = matched_output {
+            self.pending_keys.clear();
 
-                let mut actions = Vec::new();
-                // Flush any remaining tentative kana first
-                let flush = self.flush_tentative();
-                if !flush.is_empty() {
-                    actions.extend(flush);
-                    actions.push(OutputAction::MozcSubmit);
-                }
-                // Resolve aliases / sequences, then emit each token
-                let tokens: Vec<String> = self
-                    .resolve_sequence(&output)
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                for token in tokens {
-                    actions.push(if Self::is_immediate_action_token(&token) {
-                        Self::make_output_action(&token)
-                    } else {
-                        OutputAction::CommitDirect(token)
-                    });
-                }
-                return actions;
+            let mut actions = Vec::new();
+            let flush = self.flush_tentative();
+            if !flush.is_empty() {
+                actions.extend(flush);
+                actions.push(OutputAction::MozcSubmit);
             }
+            let tokens: Vec<String> = self
+                .resolve_sequence(&output)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            for token in tokens {
+                actions.push(if Self::is_immediate_action_token(&token) {
+                    Self::make_output_action(&token)
+                } else {
+                    OutputAction::CommitDirect(token)
+                });
+            }
+            return actions;
         }
 
         // Check for prefix match (more keys expected)
@@ -892,7 +896,7 @@ impl StateMachine {
             } else if ms.held() {
                 match mod_def.hold_detection {
                     HoldDetection::Timeout => {
-                        now.duration_since(ms.pressed_at).as_millis() as u32
+                        now.saturating_duration_since(ms.pressed_at).as_millis() as u32
                             >= mod_def.hold_timeout_ms
                     }
                     HoldDetection::Interrupt => true,
@@ -1050,17 +1054,13 @@ impl StateMachine {
         if self.pending_keys.len() < 2 || self.has_prefix_continuation() {
             return;
         }
-        // Build the kept set with only immutable borrows (chord_window_for reads
-        // self.layout), then replace, to avoid a borrow conflict with retain.
-        let kept: Vec<(String, Instant)> = self
-            .pending_keys
-            .iter()
-            .filter(|(k, ts)| {
-                now.duration_since(*ts).as_millis() as u64 <= u64::from(self.chord_window_for(k))
-            })
-            .cloned()
-            .collect();
-        self.pending_keys = kept;
+        let windows: Vec<u32> = self.pending_keys.iter().map(|(k, _)| self.chord_window_for(k)).collect();
+        let mut i = 0;
+        self.pending_keys.retain(|(_, ts)| {
+            let keep = now.saturating_duration_since(*ts).as_millis() as u64 <= u64::from(windows[i]);
+            i += 1;
+            keep
+        });
     }
 
     fn update_chord_deadline(&mut self) {

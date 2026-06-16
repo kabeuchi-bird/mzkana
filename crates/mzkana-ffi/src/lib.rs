@@ -69,12 +69,13 @@ impl Default for MzkanaResult {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Write `src` into `dst` as NUL-terminated bytes, truncating if needed.
-/// Returns the number of bytes written (excluding NUL).
 fn fill_buf(dst: &mut [u8], src: &str) -> u32 {
-    let bytes = src.as_bytes();
-    let len = bytes.len().min(dst.len().saturating_sub(1));
-    dst[..len].copy_from_slice(&bytes[..len]);
+    let max = dst.len().saturating_sub(1);
+    let mut len = src.len().min(max);
+    while !src.is_char_boundary(len) {
+        len -= 1;
+    }
+    dst[..len].copy_from_slice(&src.as_bytes()[..len]);
     dst[len] = 0;
     len as u32
 }
@@ -248,12 +249,19 @@ pub unsafe extern "C" fn mzkana_engine_reset(engine: *mut MzkanaEngine) {
 /// Handle focus loss, honoring the layout's `on_focus_change` setting
 /// (preserve / reset). Call from the C++ `deactivate` handler.
 ///
+/// Returns 1 if the composition state was preserved (caller should NOT clear
+/// preedit), 0 if it was reset (caller should clear preedit).
+///
 /// # Safety
 /// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn mzkana_engine_focus_out(engine: *mut MzkanaEngine) {
-    if let Some(engine) = engine.as_mut() {
-        engine.0.focus_out();
+pub unsafe extern "C" fn mzkana_engine_focus_out(engine: *mut MzkanaEngine) -> u8 {
+    match engine.as_mut() {
+        Some(e) => {
+            let preserved = e.0.focus_out_preserved();
+            preserved as u8
+        }
+        None => 0,
     }
 }
 
@@ -277,6 +285,76 @@ pub unsafe extern "C" fn mzkana_engine_preedit_fallback(engine: *const MzkanaEng
     engine.as_ref().map_or(1, |e| e.0.preedit_fallback())
 }
 
+/// Resolved `candidate_page_size` (configtool override > TOML > default 5).
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_candidate_page_size(engine: *const MzkanaEngine) -> i32 {
+    engine.as_ref().map_or(5, |e| e.0.candidate_page_size())
+}
+
+/// Resolved `show_prediction` (1 = show, 0 = hide).
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_show_prediction(engine: *const MzkanaEngine) -> u8 {
+    engine.as_ref().map_or(1, |e| e.0.show_prediction() as u8)
+}
+
+/// Set the configtool override for `preedit_fallback`.
+/// Pass -1 to clear the override (use TOML value).
+/// 0 = client, 1 = panel, 2 = buffer, 3 = auto.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_preedit_fallback(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_preedit_fallback_override(value);
+    }
+}
+
+/// Set the configtool override for `on_focus_change`.
+/// Pass -1 to clear the override (use TOML value).
+/// 0 = preserve, 1 = reset.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_on_focus_change(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_on_focus_change_override(value);
+    }
+}
+
+/// Set the configtool override for `candidate_page_size`.
+/// Pass 0 to clear the override (use TOML value).
+/// Valid range: 1–9.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_candidate_page_size(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_candidate_page_size_override(value);
+    }
+}
+
+/// Set the configtool override for `show_prediction`.
+/// Pass -1 to clear the override (use TOML value).
+/// 0 = hide, 1 = show.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_set_show_prediction(engine: *mut MzkanaEngine, value: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.0.set_show_prediction_override(value);
+    }
+}
+
 /// Check whether the config file changed and reload it if so.
 ///
 /// Returns 1 if the config was reloaded, 0 otherwise.
@@ -290,6 +368,31 @@ pub unsafe extern "C" fn mzkana_engine_check_reload(engine: *mut MzkanaEngine) -
         .as_mut()
         .map(|e| e.0.check_reload() as u8)
         .unwrap_or(0)
+}
+
+/// Switch to a different layout file (configtool selection, §13.5) and reload it
+/// immediately. `path` is a NUL-terminated UTF-8 path to a layout TOML file.
+///
+/// Returns 1 on success, 0 on failure (the current layout is kept). On success
+/// the hot-reload watch is moved to the new file's directory.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `mzkana_engine_create`, or NULL.
+/// `path` must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn mzkana_engine_reload_layout(
+    engine: *mut MzkanaEngine,
+    path: *const c_char,
+) -> u8 {
+    if engine.is_null() || path.is_null() {
+        return 0;
+    }
+    let engine = &mut *engine;
+    let path = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    engine.0.reload_layout_from(Path::new(path)) as u8
 }
 
 /// Returns 1 if the Mozc conversion engine is connected, 0 otherwise.

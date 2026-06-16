@@ -63,7 +63,9 @@ endif()
 if(Fcitx5Core_FOUND AND NOT FCITX5_USE_SRC_HEADERS)
     message(STATUS "Using installed fcitx5 CMake config (${Fcitx5Core_VERSION})")
     # Fcitx5Core provides Fcitx5::Core and Fcitx5::Utils targets.
-    # Nothing else to do here.
+    # The config API (fcitx-config/*, used by the settings GUI, §13.5) lives in
+    # the separate Fcitx5Config package.
+    find_package(Fcitx5Config 5.0 REQUIRED)
 else()
     message(STATUS "fcitx5-core CMake config not found; using source-tree headers")
 
@@ -83,6 +85,8 @@ else()
         CACHE FILEPATH "libFcitx5Core shared library")
     set(FCITX5_UTILS_LIB "/usr/lib/x86_64-linux-gnu/libFcitx5Utils.so"
         CACHE FILEPATH "libFcitx5Utils shared library")
+    set(FCITX5_CONFIG_LIB "/usr/lib/x86_64-linux-gnu/libFcitx5Config.so"
+        CACHE FILEPATH "libFcitx5Config shared library")
 
     add_library(Fcitx5::Core SHARED IMPORTED)
     set_target_properties(Fcitx5::Core PROPERTIES
@@ -93,6 +97,13 @@ else()
     add_library(Fcitx5::Utils SHARED IMPORTED)
     set_target_properties(Fcitx5::Utils PROPERTIES
         IMPORTED_LOCATION "${FCITX5_UTILS_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FCITX5_SRC_INCLUDE};${FCITX5_STUB_INCLUDE}"
+    )
+
+    # fcitx-config/* headers (settings GUI, §13.5).
+    add_library(Fcitx5::Config SHARED IMPORTED)
+    set_target_properties(Fcitx5::Config PROPERTIES
+        IMPORTED_LOCATION "${FCITX5_CONFIG_LIB}"
         INTERFACE_INCLUDE_DIRECTORIES "${FCITX5_SRC_INCLUDE};${FCITX5_STUB_INCLUDE}"
     )
 endif()
@@ -124,6 +135,7 @@ target_link_libraries(fcitx5-mzkana PRIVATE
     Mzkana::FFI
     Fcitx5::Core
     Fcitx5::Utils
+    Fcitx5::Config
 )
 
 # Fcitx5 addon .so must be named without the "lib" prefix.

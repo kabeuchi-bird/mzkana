@@ -3,6 +3,8 @@
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
 #include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/log.h>
+#include <fcitx-config/iniparser.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputmethodentry.h>
@@ -19,12 +21,14 @@ namespace mzkana {
 
 MzkanaFcitxEngine::MzkanaFcitxEngine(fcitx::Instance *instance)
     : instance_(instance) {
-    tryInitEngine();
+    // Load persisted settings (conf/mzkana.conf), falling back to defaults, then
+    // create the engine for the selected layout.
+    reloadConfig();
 }
 
 void MzkanaFcitxEngine::tryInitEngine() {
     if (engine_) return;
-    engine_ = mzkana_engine_create(defaultConfigPath().c_str(), nullptr);
+    engine_ = mzkana_engine_create(currentLayoutPath().c_str(), nullptr);
     // engine_ may still be null if the layout file doesn't exist yet; retry
     // on the next keyEvent or activate call.
     mozcAvailable_ = engine_ && mzkana_engine_mozc_available(engine_);
@@ -34,10 +38,76 @@ MzkanaFcitxEngine::~MzkanaFcitxEngine() {
     mzkana_engine_destroy(engine_);
 }
 
-std::string MzkanaFcitxEngine::defaultConfigPath() const {
-    const char *home = std::getenv("HOME");
-    if (!home) home = "/root";
-    return std::string(home) + "/.config/fcitx5/conf/mzkana/layout.toml";
+std::string MzkanaFcitxEngine::currentLayoutPath() const {
+    return layoutDir() + "/" + config_.layout.value();
+}
+
+// §13.5: apply the configtool selection. Hot-swaps the layout in the running
+// engine (Mozc connection preserved); creates the engine if it didn't exist yet
+// (e.g. the file was missing at startup but has since appeared).
+bool MzkanaFcitxEngine::reloadSelectedLayout() {
+    const std::string path = currentLayoutPath();
+    if (engine_) {
+        if (path != lastLayoutPath_) {
+            if (!mzkana_engine_reload_layout(engine_, path.c_str())) {
+                FCITX_WARN() << "mzkana: failed to load layout: " << path;
+                return false;
+            }
+            lastLayoutPath_ = path;
+        }
+    } else {
+        engine_ = mzkana_engine_create(path.c_str(), nullptr);
+        if (!engine_) {
+            return false;
+        }
+        lastLayoutPath_ = path;
+    }
+    mozcAvailable_ = engine_ && mzkana_engine_mozc_available(engine_);
+    applyConfigOverrides();
+    return true;
+}
+
+void MzkanaFcitxEngine::applyConfigOverrides() {
+    if (!engine_) return;
+
+    // preedit_fallback: FollowLayout → -1 (use TOML), Client → 0, …
+    mzkana_engine_set_preedit_fallback(
+        engine_,
+        static_cast<int>(*config_.preeditFallback) - 1);
+
+    // on_focus_change: FollowLayout → -1, Preserve → 0, Reset → 1
+    mzkana_engine_set_on_focus_change(
+        engine_,
+        static_cast<int>(*config_.onFocusChange) - 1);
+
+    // candidate_page_size: 0 = use TOML default
+    mzkana_engine_set_candidate_page_size(
+        engine_,
+        *config_.candidatePageSize);
+
+    // show_prediction: FollowLayout → -1, Show → 1, Hide → 0
+    int showPred;
+    switch (*config_.showPrediction) {
+    case ShowPredictionOption::Show:  showPred = 1;  break;
+    case ShowPredictionOption::Hide:  showPred = 0;  break;
+    default:                          showPred = -1; break;
+    }
+    mzkana_engine_set_show_prediction(engine_, showPred);
+}
+
+void MzkanaFcitxEngine::setConfig(const fcitx::RawConfig &raw) {
+    MzkanaConfig prev = config_;
+    config_.load(raw, true);
+    if (!reloadSelectedLayout()) {
+        config_ = prev;
+        return;
+    }
+    fcitx::safeSaveAsIni(config_, "conf/mzkana.conf");
+}
+
+void MzkanaFcitxEngine::reloadConfig() {
+    fcitx::readAsIni(config_, "conf/mzkana.conf");
+    reloadSelectedLayout();
 }
 
 void MzkanaFcitxEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
@@ -137,11 +207,13 @@ void MzkanaFcitxEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
 
 void MzkanaFcitxEngine::deactivate(const fcitx::InputMethodEntry & /*entry*/,
                                     fcitx::InputContextEvent &event) {
-    // H3: honor on_focus_change (preserve / reset) on focus loss.
+    bool preserved = false;
     if (engine_) {
-        mzkana_engine_focus_out(engine_);
+        preserved = mzkana_engine_focus_out(engine_) != 0;
     }
-    clearPreedit(event.inputContext());
+    if (!preserved) {
+        clearPreedit(event.inputContext());
+    }
 }
 
 void MzkanaFcitxEngine::reset(const fcitx::InputMethodEntry & /*entry*/,
@@ -263,9 +335,10 @@ namespace {
 // back through the C ABI.
 class MzkanaCandidateWord : public fcitx::CandidateWord {
 public:
-    MzkanaCandidateWord(MzkanaEngine *engine, int32_t id, const std::string &text,
+    MzkanaCandidateWord(MzkanaEngine *engine, MzkanaFcitxEngine *host,
+                        int32_t id, const std::string &text,
                         const std::string &comment)
-        : engine_(engine), id_(id) {
+        : engine_(engine), host_(host), id_(id) {
         fcitx::Text t(text);
         setText(std::move(t));
         if (!comment.empty()) {
@@ -277,7 +350,6 @@ public:
         if (engine_ == nullptr) {
             return;
         }
-        // id_ < 0 means Mozc assigned no selectable id; ignore the request.
         if (id_ < 0) {
             return;
         }
@@ -286,14 +358,20 @@ public:
             ic->commitString(std::string(
                 reinterpret_cast<const char *>(r.commit), r.commit_len));
         }
-        // Selection ends composition: clear preedit and candidate window.
-        ic->inputPanel().reset();
-        ic->updatePreedit();
-        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        // Selection ends composition: fully clean up C++ state so the tick
+        // timer stops and preedit/candidate caches are reset.
+        if (host_) {
+            host_->clearPreedit(ic);
+        } else {
+            ic->inputPanel().reset();
+            ic->updatePreedit();
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        }
     }
 
 private:
     MzkanaEngine *engine_;
+    MzkanaFcitxEngine *host_;
     int32_t id_;
 };
 
@@ -301,6 +379,15 @@ private:
 
 void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
     uint32_t n = mzkana_engine_candidate_count(engine_);
+    int32_t focused = mzkana_engine_focused_index(engine_);
+
+    // Suppress the prediction/suggestion window (focused == -1) when
+    // show_prediction is off. Conversion candidates (focused >= 0) are
+    // always shown — hiding them would make conversion unusable.
+    if (n > 0 && focused < 0 && !mzkana_engine_show_prediction(engine_)) {
+        n = 0;
+    }
+
     if (n == 0) {
         // No window: drop any existing candidate list (only touch the UI if there
         // is one to clear, so empty ticks stay cheap).
@@ -311,8 +398,6 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
         }
         return;
     }
-
-    int32_t focused = mzkana_engine_focused_index(engine_);
 
     // Build a signature of value/id per candidate plus the focused index. If it
     // matches the last render, the window is unchanged — skip the rebuild so the
@@ -346,13 +431,17 @@ void MzkanaFcitxEngine::applyCandidates(fcitx::InputContext *ic) {
     lastCandidateSig_ = std::move(sig);
 
     auto list = std::make_unique<fcitx::CommonCandidateList>();
-    list->setPageSize(9);
-    list->setSelectionKey(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    int pageSize = mzkana_engine_candidate_page_size(engine_);
+    if (pageSize < 1 || pageSize > 9) pageSize = 5;
+    list->setPageSize(pageSize);
+    static const auto kSelectionKeys =
+        fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9");
+    list->setSelectionKey(kSelectionKeys);
     // Mozc's conversion/prediction window is vertical.
     list->setLayoutHint(fcitx::CandidateLayoutHint::Vertical);
 
     for (auto &e : entries) {
-        list->append<MzkanaCandidateWord>(engine_, e.id, e.value, e.comment);
+        list->append<MzkanaCandidateWord>(engine_, this, e.id, e.value, e.comment);
     }
 
     // During conversion Mozc reports the focused index; highlight it.
@@ -370,7 +459,9 @@ bool MzkanaFcitxEngine::handleCandidateKey(fcitx::InputContext *ic,
     if (!candidateList) return false;
 
     // Number keys 1..9 select the candidate at that position on the current page.
-    int idx = key.keyListIndex(fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+    static const auto kSelectionKeys =
+        fcitx::Key::keyListFromString("1 2 3 4 5 6 7 8 9");
+    int idx = key.keyListIndex(kSelectionKeys);
     if (idx >= 0 && idx < candidateList->size()) {
         candidateList->candidate(idx).select(ic);
         return true;

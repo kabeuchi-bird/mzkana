@@ -10,16 +10,13 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 
 pub struct Engine {
     sm: StateMachine,
-    /// Mozc IPC runs on a worker thread with a hard timeout so a slow/hung
-    /// `mozc_server` can never freeze the UI (C5).
     mozc: Option<MozcWorker>,
-    /// Explicit socket path passed at construction time; None = auto-discover.
     mozc_socket: Option<PathBuf>,
-    /// When Some, don't attempt to reconnect until this instant.
     mozc_retry_at: Option<Instant>,
     config_path: PathBuf,
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
     reload_rx: mpsc::Receiver<()>,
+    trace_enabled: bool,
     preedit: String,
     /// Candidate window from the most recent Mozc output (current page), stored as
     /// NUL-terminated UTF-8 buffers so the FFI layer can hand out C string pointers
@@ -29,6 +26,13 @@ pub struct Engine {
     /// Focused candidate index during conversion; `None` for suggestion windows or
     /// when there is no candidate window.
     focused_index: Option<u32>,
+    /// Configtool overrides: when `Some`, these take priority over the TOML
+    /// `[settings]` values. Set via `mzkana_engine_set_*` FFI calls from the
+    /// C++ `reloadConfig` / `setConfig` path; `None` means "use TOML value".
+    preedit_fallback_override: Option<PreeditFallback>,
+    on_focus_change_override: Option<OnFocusChange>,
+    candidate_page_size_override: Option<u32>,
+    show_prediction_override: Option<bool>,
 }
 
 /// Candidate prepared for the C ABI: NUL-terminated UTF-8 buffers plus the
@@ -105,11 +109,16 @@ impl Engine {
             mozc_socket: socket_path.map(Path::to_path_buf),
             mozc_retry_at: None,
             config_path: config_path.to_path_buf(),
-            _watcher: watcher,
+            watcher,
             reload_rx,
+            trace_enabled: std::env::var_os("MZKANA_TRACE").is_some(),
             preedit: String::new(),
             candidates: Vec::new(),
             focused_index: None,
+            preedit_fallback_override: None,
+            on_focus_change_override: None,
+            candidate_page_size_override: None,
+            show_prediction_override: None,
         })
     }
 
@@ -148,6 +157,61 @@ impl Engine {
         }
     }
 
+    /// Switch to a different layout file (configtool selection path, §13.5) and
+    /// reload it immediately. Moves the hot-reload watch to the new file's
+    /// directory when it differs. Returns true if the new layout loaded; on
+    /// failure the current layout is kept unchanged.
+    pub fn reload_layout_from(&mut self, new_path: &Path) -> bool {
+        let layout = match std::fs::read_to_string(new_path)
+            .ok()
+            .and_then(|src| load_layout(&src).ok())
+        {
+            Some(l) => l,
+            None => {
+                tracing::warn!(
+                    "layout load failed for {}, keeping current config",
+                    new_path.display()
+                );
+                return false;
+            }
+        };
+
+        // H4: revert the in-flight composition before swapping (same rationale as
+        // check_reload — the StateMachine's tentative buffer is dropped, so the
+        // speculative kana already sent to Mozc must be reverted first).
+        self.reset();
+        self.sm = StateMachine::new(layout);
+
+        // Move the hot-reload watch to the new file's directory if it changed, so
+        // direct edits to the newly selected file are still picked up (§10).
+        // Watch the new directory first; only unwatch the old one on success so
+        // a failed re-watch doesn't leave the watcher completely detached.
+        let old_parent = self.config_path.parent().map(Path::to_path_buf);
+        let new_parent = new_path.parent().map(Path::to_path_buf);
+        if old_parent != new_parent {
+            let watched = if let Some(new) = new_parent.as_deref() {
+                match self.watcher.watch(new, RecursiveMode::NonRecursive) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!("hot-reload re-watch failed for {}: {e}", new.display());
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if watched {
+                if let Some(old) = old_parent.as_deref() {
+                    let _ = self.watcher.unwatch(old);
+                }
+            }
+        }
+
+        self.config_path = new_path.to_path_buf();
+        tracing::info!("layout switched to {}", self.config_path.display());
+        true
+    }
+
     pub fn key_event(&mut self, key: &str, is_down: bool, shift: bool) -> ProcessResult {
         let now = Instant::now();
         self.try_reconnect_mozc(now);
@@ -158,10 +222,7 @@ impl Engine {
         };
 
         let actions = self.sm.process(event, now);
-        // Diagnostic: set MZKANA_TRACE=1 to log every key event and the resulting
-        // state-machine actions. Lets us capture the exact on-device event sequence
-        // behind chord misfires without guessing at interleavings.
-        if std::env::var_os("MZKANA_TRACE").is_some() {
+        if self.trace_enabled {
             eprintln!(
                 "[mzkana-trace] key={key:?} {} shift={shift} → actions={actions:?} tentative={:?}",
                 if is_down { "DOWN" } else { "UP" },
@@ -267,12 +328,16 @@ impl Engine {
     }
 
     /// Handle focus loss (IM deactivation), honoring the `on_focus_change` setting (H3).
-    pub fn focus_out(&mut self) {
-        match self.sm.settings().on_focus_change {
-            // Keep the in-progress composition so it resumes when focus returns.
-            OnFocusChange::Preserve => {}
-            // Discard the in-progress composition (revert + clear preedit).
-            OnFocusChange::Reset => self.reset(),
+    /// Returns `true` if the composition was preserved (caller should not clear UI).
+    pub fn focus_out_preserved(&mut self) -> bool {
+        let behavior = self.on_focus_change_override
+            .unwrap_or(self.sm.settings().on_focus_change);
+        match behavior {
+            OnFocusChange::Preserve => true,
+            OnFocusChange::Reset => {
+                self.reset();
+                false
+            }
         }
     }
 
@@ -288,12 +353,60 @@ impl Engine {
     /// `preedit_fallback` setting as an int for the FFI/C++ layer
     /// (0 = client, 1 = panel, 2 = buffer, 3 = auto).
     pub fn preedit_fallback(&self) -> i32 {
-        match self.sm.settings().preedit_fallback {
+        let val = self.preedit_fallback_override
+            .unwrap_or(self.sm.settings().preedit_fallback);
+        match val {
             PreeditFallback::Client => 0,
             PreeditFallback::Panel => 1,
             PreeditFallback::Buffer => 2,
             PreeditFallback::Auto => 3,
         }
+    }
+
+    /// Resolved `candidate_page_size` (configtool override > TOML > default 5).
+    pub fn candidate_page_size(&self) -> i32 {
+        self.candidate_page_size_override
+            .unwrap_or(self.sm.settings().candidate_page_size) as i32
+    }
+
+    /// Resolved `show_prediction` (configtool override > TOML > default true).
+    pub fn show_prediction(&self) -> bool {
+        self.show_prediction_override
+            .unwrap_or(self.sm.settings().show_prediction)
+    }
+
+    pub fn set_preedit_fallback_override(&mut self, val: i32) {
+        self.preedit_fallback_override = match val {
+            0 => Some(PreeditFallback::Client),
+            1 => Some(PreeditFallback::Panel),
+            2 => Some(PreeditFallback::Buffer),
+            3 => Some(PreeditFallback::Auto),
+            _ => None,
+        };
+    }
+
+    pub fn set_on_focus_change_override(&mut self, val: i32) {
+        self.on_focus_change_override = match val {
+            0 => Some(OnFocusChange::Preserve),
+            1 => Some(OnFocusChange::Reset),
+            _ => None,
+        };
+    }
+
+    pub fn set_candidate_page_size_override(&mut self, val: i32) {
+        self.candidate_page_size_override = if (1..=9).contains(&val) {
+            Some(val as u32)
+        } else {
+            None
+        };
+    }
+
+    pub fn set_show_prediction_override(&mut self, val: i32) {
+        self.show_prediction_override = match val {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        };
     }
 
     /// Translate an `OutputAction` into the Mozc op it issues, if any.
@@ -304,7 +417,11 @@ impl Engine {
             OutputAction::MozcSubmit => Some(Op::Submit),
             OutputAction::SendFunctionKey(name) => Some(Op::SendFunctionKey(name.clone())),
             OutputAction::SendModifiedKey { key, mods } => {
-                Some(Op::SendModified { key: key.clone(), mods: *mods })
+                if *mods & mzkana_core::MOD_SUPER != 0 {
+                    None
+                } else {
+                    Some(Op::SendModified { key: key.clone(), mods: *mods })
+                }
             }
             OutputAction::SubmitAndCommit(_) | OutputAction::SubmitThenPassthrough(_) => Some(Op::Submit),
             OutputAction::Passthrough(_) | OutputAction::CommitDirect(_) => None,
@@ -501,4 +618,88 @@ pub struct ProcessResult {
     /// call ic->forwardKey() with this key name and the modifier bitmask.
     pub forward_key: Option<String>,
     pub forward_mods: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../layouts")
+            .join(name)
+    }
+
+    /// Build an engine without touching a real Mozc server: a bogus socket path
+    /// makes `connect` skip server auto-spawn and fail fast (mozc → None).
+    fn engine_for(layout: &str) -> Engine {
+        let bogus = Path::new("/nonexistent/mzkana-test.sock");
+        Engine::new(&layout_path(layout), Some(bogus)).expect("engine builds without Mozc")
+    }
+
+    #[test]
+    fn reload_layout_switches_to_a_different_file() {
+        let mut e = engine_for("naginata-v17.toml");
+        let target = layout_path("tsuki-2-263.toml");
+        assert!(e.reload_layout_from(&target), "valid layout should load");
+        assert_eq!(e.config_path, target, "config_path tracks the new file");
+    }
+
+    #[test]
+    fn reload_layout_keeps_current_on_failure() {
+        let mut e = engine_for("naginata-v17.toml");
+        let original = e.config_path.clone();
+        let missing = Path::new("/nonexistent/does-not-exist.toml");
+        assert!(!e.reload_layout_from(missing), "missing file should fail");
+        assert_eq!(e.config_path, original, "config_path unchanged on failure");
+    }
+
+    #[test]
+    fn preedit_fallback_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        let toml_val = e.preedit_fallback();
+        assert_eq!(toml_val, 1, "TOML default is panel(1)");
+
+        e.set_preedit_fallback_override(2); // buffer
+        assert_eq!(e.preedit_fallback(), 2);
+
+        e.set_preedit_fallback_override(-1); // clear → back to TOML
+        assert_eq!(e.preedit_fallback(), toml_val);
+    }
+
+    #[test]
+    fn on_focus_change_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        assert!(e.focus_out_preserved(), "TOML default is preserve");
+
+        e.set_on_focus_change_override(1); // reset
+        assert!(!e.focus_out_preserved());
+
+        e.set_on_focus_change_override(-1); // clear → back to TOML
+        assert!(e.focus_out_preserved());
+    }
+
+    #[test]
+    fn candidate_page_size_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        assert_eq!(e.candidate_page_size(), 5, "TOML default is 5");
+
+        e.set_candidate_page_size_override(3);
+        assert_eq!(e.candidate_page_size(), 3);
+
+        e.set_candidate_page_size_override(0); // clear → back to TOML
+        assert_eq!(e.candidate_page_size(), 5);
+    }
+
+    #[test]
+    fn show_prediction_override_takes_priority() {
+        let mut e = engine_for("naginata-v17.toml");
+        assert!(e.show_prediction(), "TOML default is true");
+
+        e.set_show_prediction_override(0); // hide
+        assert!(!e.show_prediction());
+
+        e.set_show_prediction_override(-1); // clear → back to TOML
+        assert!(e.show_prediction());
+    }
 }
