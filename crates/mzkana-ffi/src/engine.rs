@@ -595,7 +595,13 @@ impl Engine {
         }
         if out.is_converting {
             self.sm.notify_mozc_conversion();
-        } else {
+        } else if self.preedit_segments.len() <= 1 {
+            // Downgrade to Composition when there is at most one segment.
+            // During conversion Mozc may return no HIGHLIGHT (e.g. cursor at
+            // position 0) while the multi-segment conversion session is still
+            // active; a premature downgrade would cause control keys to stop
+            // reaching Mozc.  A single segment (or empty) means Mozc is
+            // genuinely in composition mode (Escape, commit, etc.).
             self.sm.notify_mozc_composition();
         }
     }
