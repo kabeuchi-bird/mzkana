@@ -105,7 +105,15 @@ pub mod composition_mode {
 
 /// Preedit.Segment.Annotation
 pub mod annotation {
+    pub const UNDERLINE: i32 = 1;
     pub const HIGHLIGHT: i32 = 2;
+}
+
+/// One segment of the Mozc preedit with its formatting annotation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreeditSegment {
+    pub value: String,
+    pub annotation: i32,
 }
 
 // ── Encoding ─────────────────────────────────────────────────────────────────
@@ -250,6 +258,8 @@ pub struct DecodedOutput {
     pub consumed: bool,
     pub result_value: Option<String>,
     pub preedit_text: String,
+    /// Per-segment preedit data with annotations (UNDERLINE / HIGHLIGHT).
+    pub preedit_segments: Vec<PreeditSegment>,
     /// True if any preedit segment is highlighted (indicates CONVERSION mode).
     pub preedit_has_highlight: bool,
     /// Candidates in the current window (current page only).
@@ -282,6 +292,10 @@ pub fn decode_response(data: &[u8]) -> std::result::Result<DecodedOutput, prost:
         let mut preedit_str = String::new();
         for segment in &preedit.segment {
             preedit_str.push_str(&segment.value);
+            out.preedit_segments.push(PreeditSegment {
+                value: segment.value.clone(),
+                annotation: segment.annotation,
+            });
             if segment.annotation == annotation::HIGHLIGHT {
                 out.preedit_has_highlight = true;
             }

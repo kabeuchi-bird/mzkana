@@ -6,3 +6,4 @@ namespace = ""
 sys_includes = []
 no_includes = false
 documentation = true
+after_includes = "#define MAX_PREEDIT_SEGMENTS 16"

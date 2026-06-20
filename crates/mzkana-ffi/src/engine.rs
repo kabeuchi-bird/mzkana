@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use mzkana_core::{
     load_layout, InputEvent, MozcOutput, MozcWorker, Op, OnFocusChange,
-    OutputAction, PreeditFallback, SensitiveFieldBehavior, StateMachine, WorkerError,
+    OutputAction, PreeditFallback, PreeditSegment, SensitiveFieldBehavior,
+    StateMachine, WorkerError,
 };
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -18,6 +19,7 @@ pub struct Engine {
     reload_rx: mpsc::Receiver<()>,
     trace_enabled: bool,
     preedit: String,
+    preedit_segments: Vec<PreeditSegment>,
     /// Candidate window from the most recent Mozc output (current page), stored as
     /// NUL-terminated UTF-8 buffers so the FFI layer can hand out C string pointers
     /// that stay valid until the next key event. Read by the candidate accessors;
@@ -113,6 +115,7 @@ impl Engine {
             reload_rx,
             trace_enabled: std::env::var_os("MZKANA_TRACE").is_some(),
             preedit: String::new(),
+            preedit_segments: Vec::new(),
             candidates: Vec::new(),
             focused_index: None,
             preedit_fallback_override: None,
@@ -266,6 +269,7 @@ impl Engine {
         ProcessResult {
             consumed,
             preedit: self.preedit.clone(),
+            preedit_segments: self.preedit_segments.clone(),
             commit,
             passthrough_key: None,
             forward_key: None,
@@ -278,6 +282,7 @@ impl Engine {
     /// return state left over from a finished composition.
     fn clear_ui_cache(&mut self) {
         self.preedit.clear();
+        self.preedit_segments.clear();
         self.candidates.clear();
         self.focused_index = None;
     }
@@ -445,6 +450,7 @@ impl Engine {
             return ProcessResult {
                 consumed: is_key_down,
                 preedit: self.preedit.clone(),
+                preedit_segments: self.preedit_segments.clone(),
                 commit: None,
                 passthrough_key: None,
                 forward_key: None,
@@ -572,11 +578,12 @@ impl Engine {
         }
 
         let consumed = any_consumed || passthrough_key.is_none();
-        ProcessResult { consumed, preedit: self.preedit.clone(), commit, passthrough_key, forward_key, forward_mods }
+        ProcessResult { consumed, preedit: self.preedit.clone(), preedit_segments: self.preedit_segments.clone(), commit, passthrough_key, forward_key, forward_mods }
     }
 
     fn apply_mozc_output(&mut self, out: MozcOutput, commit: &mut Option<String>) {
         self.preedit = out.preedit;
+        self.preedit_segments = out.preedit_segments;
         // The latest output's candidate window reflects the current UI state.
         self.candidates = out.candidates.into_iter().map(FfiCandidate::from_core).collect();
         self.focused_index = out.focused_index;
@@ -612,6 +619,7 @@ impl Engine {
 pub struct ProcessResult {
     pub consumed: bool,
     pub preedit: String,
+    pub preedit_segments: Vec<PreeditSegment>,
     pub commit: Option<String>,
     pub passthrough_key: Option<String>,
     /// Set when a modifier+key token was not consumed by Mozc; the C++ layer should

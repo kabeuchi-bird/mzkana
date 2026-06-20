@@ -7,11 +7,32 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#define MAX_PREEDIT_SEGMENTS 16
 
 /**
  * Opaque engine handle returned by `mzkana_engine_create`.
  */
 typedef struct MzkanaEngine MzkanaEngine;
+
+/**
+ * One preedit segment with its Mozc annotation. During conversion the
+ * currently-focused bunsetsu has `attr == 2` (HIGHLIGHT); other segments are
+ * `1` (UNDERLINE) or `0` (NONE).
+ */
+typedef struct MzkanaPreeditSegment {
+  /**
+   * Byte offset into `MzkanaResult.preedit`.
+   */
+  uint32_t start;
+  /**
+   * Byte length of this segment in the preedit buffer.
+   */
+  uint32_t len;
+  /**
+   * Mozc annotation: 0 = NONE, 1 = UNDERLINE, 2 = HIGHLIGHT.
+   */
+  uint8_t attr;
+} MzkanaPreeditSegment;
 
 /**
  * Result of processing a key event.
@@ -31,6 +52,13 @@ typedef struct MzkanaResult {
    */
   uint8_t preedit[512];
   uint32_t preedit_len;
+  /**
+   * Per-segment annotation data for the preedit. During composition there is
+   * typically a single UNDERLINE segment; during conversion, each bunsetsu is
+   * a separate segment and the focused one has HIGHLIGHT.
+   */
+  struct MzkanaPreeditSegment preedit_segments[MAX_PREEDIT_SEGMENTS];
+  uint32_t preedit_segment_count;
   /**
    * Text to commit to the application (may be empty).
    */

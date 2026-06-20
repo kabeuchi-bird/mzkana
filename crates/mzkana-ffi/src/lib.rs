@@ -18,6 +18,22 @@ pub struct MzkanaEngine(Engine);
 
 // ── Result struct ─────────────────────────────────────────────────────────────
 
+/// One preedit segment with its Mozc annotation. During conversion the
+/// currently-focused bunsetsu has `attr == 2` (HIGHLIGHT); other segments are
+/// `1` (UNDERLINE) or `0` (NONE).
+#[repr(C)]
+pub struct MzkanaPreeditSegment {
+    /// Byte offset into `MzkanaResult.preedit`.
+    pub start: u32,
+    /// Byte length of this segment in the preedit buffer.
+    pub len: u32,
+    /// Mozc annotation: 0 = NONE, 1 = UNDERLINE, 2 = HIGHLIGHT.
+    pub attr: u8,
+}
+
+/// Maximum number of preedit segments (must match MAX_PREEDIT_SEGMENTS in cbindgen.toml).
+const MAX_PREEDIT_SEGMENTS: usize = 16;
+
 /// Result of processing a key event.
 ///
 /// String fields are NUL-terminated UTF-8 byte arrays.  `*_len` gives the
@@ -32,6 +48,12 @@ pub struct MzkanaResult {
     /// Current preedit / composition string (may be empty).
     pub preedit: [u8; 512],
     pub preedit_len: u32,
+
+    /// Per-segment annotation data for the preedit. During composition there is
+    /// typically a single UNDERLINE segment; during conversion, each bunsetsu is
+    /// a separate segment and the focused one has HIGHLIGHT.
+    pub preedit_segments: [MzkanaPreeditSegment; MAX_PREEDIT_SEGMENTS],
+    pub preedit_segment_count: u32,
 
     /// Text to commit to the application (may be empty).
     pub commit: [u8; 512],
@@ -52,10 +74,13 @@ pub struct MzkanaResult {
 
 impl Default for MzkanaResult {
     fn default() -> Self {
+        // SAFETY: MzkanaPreeditSegment is all-integer fields; zeroed is valid.
         Self {
             consumed: 0,
             preedit: [0u8; 512],
             preedit_len: 0,
+            preedit_segments: unsafe { std::mem::zeroed() },
+            preedit_segment_count: 0,
             commit: [0u8; 512],
             commit_len: 0,
             passthrough_key: [0u8; 64],
@@ -84,6 +109,20 @@ fn result_from(out: engine::ProcessResult) -> MzkanaResult {
     let mut r = MzkanaResult::default();
     r.consumed = out.consumed as u8;
     r.preedit_len = fill_buf(&mut r.preedit, &out.preedit);
+
+    let seg_count = out.preedit_segments.len().min(MAX_PREEDIT_SEGMENTS);
+    r.preedit_segment_count = seg_count as u32;
+    let mut offset: u32 = 0;
+    for (i, seg) in out.preedit_segments.iter().take(seg_count).enumerate() {
+        let byte_len = seg.value.len() as u32;
+        r.preedit_segments[i] = MzkanaPreeditSegment {
+            start: offset,
+            len: byte_len,
+            attr: seg.annotation as u8,
+        };
+        offset += byte_len;
+    }
+
     if let Some(ref c) = out.commit {
         r.commit_len = fill_buf(&mut r.commit, c);
     }
