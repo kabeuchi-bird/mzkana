@@ -197,6 +197,10 @@ bash scripts/diagnose-configtool.sh
 > 有効になります。**アドオンタブ**の歯車は MzKana のチェックを ON にしているときだけ
 > 押せます（`Configurable=True` なら表示自体はされます）。
 
+> 補足: 入力メソッド定義はリポジトリ上 `data/mzkana-im.conf` ですが、インストール時に
+> `inputmethod/mzkana.conf` へ改名されます（uniqueName を `mzkana` に合わせるため）。
+> 上記コマンド・診断スクリプトが参照するのは *インストール後* の `mzkana.conf` です。
+
 ## CLI ツール
 
 ```sh

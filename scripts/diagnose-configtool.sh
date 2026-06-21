@@ -61,6 +61,9 @@ data_dirs | sed 's/^/  /'
 hdr "3. addon 定義 (Addons タブの歯車を決める)  fcitx5/addon/mzkana.conf"
 scan addon mzkana.conf
 
+# 注: リポジトリ上は data/mzkana-im.conf だが、CMake のインストール時に
+#     inputmethod/mzkana.conf へ改名される（uniqueName = mzkana に一致させるため）。
+#     よって *インストール後* に存在するファイル名は mzkana.conf。
 hdr "4. input method 定義 (入力メソッドタブの歯車を決める)  fcitx5/inputmethod/mzkana.conf"
 scan inputmethod mzkana.conf
 
