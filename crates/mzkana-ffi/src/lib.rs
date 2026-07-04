@@ -110,18 +110,31 @@ fn result_from(out: engine::ProcessResult) -> MzkanaResult {
     r.consumed = out.consumed as u8;
     r.preedit_len = fill_buf(&mut r.preedit, &out.preedit);
 
-    let seg_count = out.preedit_segments.len().min(MAX_PREEDIT_SEGMENTS);
-    r.preedit_segment_count = seg_count as u32;
+    // Segment offsets must stay within the bytes actually copied into `preedit`.
+    // `fill_buf` truncates to <=511 bytes at a UTF-8 char boundary, but the
+    // segment `start`/`len` values are derived from `out.preedit_segments`, whose
+    // total length can exceed 512 (long multi-bunsetsu conversions). `out.preedit`
+    // is the concatenation of the segment values, so cumulative byte offsets line
+    // up with the preedit bytes; clamp each segment to `preedit_len` and stop once
+    // we reach it. Without this, the C++ side's `std::string(preedit + start, len)`
+    // would read out of bounds of the fixed 512-byte buffer.
+    let limit = r.preedit_len;
     let mut offset: u32 = 0;
-    for (i, seg) in out.preedit_segments.iter().take(seg_count).enumerate() {
-        let byte_len = seg.value.len() as u32;
-        r.preedit_segments[i] = MzkanaPreeditSegment {
+    let mut seg_i = 0usize;
+    for seg in out.preedit_segments.iter() {
+        if seg_i >= MAX_PREEDIT_SEGMENTS || offset >= limit {
+            break;
+        }
+        let byte_len = (seg.value.len() as u32).min(limit - offset);
+        r.preedit_segments[seg_i] = MzkanaPreeditSegment {
             start: offset,
             len: byte_len,
             attr: seg.annotation as u8,
         };
         offset += byte_len;
+        seg_i += 1;
     }
+    r.preedit_segment_count = seg_i as u32;
 
     if let Some(ref c) = out.commit {
         r.commit_len = fill_buf(&mut r.commit, c);
@@ -531,4 +544,70 @@ pub unsafe extern "C" fn mzkana_engine_focused_index(engine: *const MzkanaEngine
         .as_ref()
         .and_then(|e| e.0.focused_index())
         .map_or(-1, |i| i as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::ProcessResult;
+    use mzkana_core::PreeditSegment;
+
+    /// Regression: a preedit longer than the fixed 512-byte buffer (long
+    /// multi-bunsetsu conversion) must never yield segment offsets that point
+    /// past `preedit_len`, or the C++ side reads out of bounds.
+    #[test]
+    fn long_preedit_segments_stay_within_buffer() {
+        // 40 segments of 5 kana each = 200 kana = 600 bytes (> 512).
+        let mut segments = Vec::new();
+        let mut preedit = String::new();
+        for i in 0..40 {
+            let value = "あいうえお".to_string();
+            preedit.push_str(&value);
+            segments.push(PreeditSegment {
+                value,
+                annotation: if i == 0 { 2 } else { 1 },
+            });
+        }
+        assert!(preedit.len() > 512, "test setup should exceed the buffer");
+
+        let out = ProcessResult {
+            consumed: true,
+            preedit,
+            preedit_segments: segments,
+            commit: None,
+            passthrough_key: None,
+            forward_key: None,
+            forward_mods: 0,
+        };
+        let r = result_from(out);
+
+        assert!(r.preedit_len <= 512);
+        assert!(r.preedit_segment_count as usize <= MAX_PREEDIT_SEGMENTS);
+        for i in 0..r.preedit_segment_count as usize {
+            let seg = &r.preedit_segments[i];
+            // start + len must stay within the copied region (no OOB).
+            assert!(
+                seg.start <= r.preedit_len && seg.len <= r.preedit_len - seg.start,
+                "segment {} start={} len={} exceeds preedit_len={}",
+                i, seg.start, seg.len, r.preedit_len
+            );
+        }
+    }
+
+    /// An empty preedit produces no segments (and no panic).
+    #[test]
+    fn empty_preedit_has_no_segments() {
+        let out = ProcessResult {
+            consumed: false,
+            preedit: String::new(),
+            preedit_segments: Vec::new(),
+            commit: None,
+            passthrough_key: None,
+            forward_key: None,
+            forward_mods: 0,
+        };
+        let r = result_from(out);
+        assert_eq!(r.preedit_len, 0);
+        assert_eq!(r.preedit_segment_count, 0);
+    }
 }
