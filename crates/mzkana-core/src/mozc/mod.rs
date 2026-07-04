@@ -3,7 +3,7 @@ pub mod client;
 pub mod worker;
 
 pub use client::{connect_mozc_abstract, default_socket_path, find_abstract_socket_name, ipc_key_from_socket_name, MozcClient, MozcError};
-pub use proto::{composition_mode, Candidate, DecodedOutput};
+pub use proto::{composition_mode, Candidate, DecodedOutput, PreeditSegment};
 pub use worker::{MozcWorker, Op, WorkerError};
 
 /// Decoded Mozc server response exposed to callers.
@@ -11,6 +11,9 @@ pub use worker::{MozcWorker, Op, WorkerError};
 pub struct MozcOutput {
     /// Current preedit string (text being composed, not yet committed).
     pub preedit: String,
+    /// Per-segment preedit data with Mozc annotations (UNDERLINE / HIGHLIGHT).
+    /// During conversion, the focused bunsetsu has annotation=HIGHLIGHT.
+    pub preedit_segments: Vec<PreeditSegment>,
     /// Text committed by Mozc (e.g. after conversion + selection).
     pub result: Option<String>,
     /// True if preedit has a highlighted segment, indicating CONVERSION mode.
@@ -31,6 +34,7 @@ impl MozcOutput {
     pub(crate) fn from_decoded(d: DecodedOutput) -> Self {
         Self {
             preedit: d.preedit_text,
+            preedit_segments: d.preedit_segments,
             result: d.result_value,
             is_converting: d.preedit_has_highlight,
             mode: d.mode,

@@ -171,6 +171,36 @@ fcitx5-configtool
 
 **「アドオン」タブ** → `MzKana` の行でチェックボックスをオン／オフすることで、アドオン自体を有効化・無効化できます。
 
+### 5. 設定（歯車）ボタンが出てこないとき
+
+configtool の歯車ボタンは、**稼働中の fcitx5 が DBus 経由で返すメタデータ**
+（`.conf` の `Configurable=True`）で表示が決まります。このメタデータは
+**fcitx5 の起動時に一度だけ** `*.conf` を走査して作られるため、`.conf` を入れ替えても
+fcitx5 を再起動しない限り反映されません（`cmake --install` だけでは不十分）。
+
+まず原因切り分けスクリプトを実行してください。
+
+```sh
+bash scripts/diagnose-configtool.sh
+```
+
+よくある原因と対処:
+
+| 症状（スクリプト出力） | 対処 |
+|---|---|
+| 「使用される定義」が `Configurable=True` なのに歯車が出ない | **fcitx5 を再起動**: `fcitx5 -r`（またはログインし直す） |
+| 「shadow されている古いコピー」が表示される | 優先度の高い場所にある旧 `.conf` を削除して再起動<br>例: `rm ~/.local/share/fcitx5/{addon,inputmethod}/mzkana.conf` |
+| 「使用される定義」が `False`／未設定 | 旧 `.conf` を掴んでいる。`sudo cmake --install build` 後に `fcitx5 -r` |
+| `mzkana.conf` がどこにも無い | インストール先プレフィックスがずれている。`-DFCITX5_DATA_DIR=` を確認して再インストール |
+
+> 補足: **入力メソッドタブ**の歯車は「選択中の入力メソッド」が configurable のときだけ
+> 有効になります。**アドオンタブ**の歯車は MzKana のチェックを ON にしているときだけ
+> 押せます（`Configurable=True` なら表示自体はされます）。
+
+> 補足: 入力メソッド定義はリポジトリ上 `data/mzkana-im.conf` ですが、インストール時に
+> `inputmethod/mzkana.conf` へ改名されます（uniqueName を `mzkana` に合わせるため）。
+> 上記コマンド・診断スクリプトが参照するのは *インストール後* の `mzkana.conf` です。
+
 ## CLI ツール
 
 ```sh

@@ -18,6 +18,22 @@ pub struct MzkanaEngine(Engine);
 
 // ── Result struct ─────────────────────────────────────────────────────────────
 
+/// One preedit segment with its Mozc annotation. During conversion the
+/// currently-focused bunsetsu has `attr == 2` (HIGHLIGHT); other segments are
+/// `1` (UNDERLINE) or `0` (NONE).
+#[repr(C)]
+pub struct MzkanaPreeditSegment {
+    /// Byte offset into `MzkanaResult.preedit`.
+    pub start: u32,
+    /// Byte length of this segment in the preedit buffer.
+    pub len: u32,
+    /// Mozc annotation: 0 = NONE, 1 = UNDERLINE, 2 = HIGHLIGHT.
+    pub attr: u8,
+}
+
+/// Maximum number of preedit segments (must match MAX_PREEDIT_SEGMENTS in cbindgen.toml).
+const MAX_PREEDIT_SEGMENTS: usize = 16;
+
 /// Result of processing a key event.
 ///
 /// String fields are NUL-terminated UTF-8 byte arrays.  `*_len` gives the
@@ -32,6 +48,12 @@ pub struct MzkanaResult {
     /// Current preedit / composition string (may be empty).
     pub preedit: [u8; 512],
     pub preedit_len: u32,
+
+    /// Per-segment annotation data for the preedit. During composition there is
+    /// typically a single UNDERLINE segment; during conversion, each bunsetsu is
+    /// a separate segment and the focused one has HIGHLIGHT.
+    pub preedit_segments: [MzkanaPreeditSegment; MAX_PREEDIT_SEGMENTS],
+    pub preedit_segment_count: u32,
 
     /// Text to commit to the application (may be empty).
     pub commit: [u8; 512],
@@ -52,10 +74,13 @@ pub struct MzkanaResult {
 
 impl Default for MzkanaResult {
     fn default() -> Self {
+        // SAFETY: MzkanaPreeditSegment is all-integer fields; zeroed is valid.
         Self {
             consumed: 0,
             preedit: [0u8; 512],
             preedit_len: 0,
+            preedit_segments: unsafe { std::mem::zeroed() },
+            preedit_segment_count: 0,
             commit: [0u8; 512],
             commit_len: 0,
             passthrough_key: [0u8; 64],
@@ -84,6 +109,33 @@ fn result_from(out: engine::ProcessResult) -> MzkanaResult {
     let mut r = MzkanaResult::default();
     r.consumed = out.consumed as u8;
     r.preedit_len = fill_buf(&mut r.preedit, &out.preedit);
+
+    // Segment offsets must stay within the bytes actually copied into `preedit`.
+    // `fill_buf` truncates to <=511 bytes at a UTF-8 char boundary, but the
+    // segment `start`/`len` values are derived from `out.preedit_segments`, whose
+    // total length can exceed 512 (long multi-bunsetsu conversions). `out.preedit`
+    // is the concatenation of the segment values, so cumulative byte offsets line
+    // up with the preedit bytes; clamp each segment to `preedit_len` and stop once
+    // we reach it. Without this, the C++ side's `std::string(preedit + start, len)`
+    // would read out of bounds of the fixed 512-byte buffer.
+    let limit = r.preedit_len;
+    let mut offset: u32 = 0;
+    let mut seg_i = 0usize;
+    for seg in out.preedit_segments.iter() {
+        if seg_i >= MAX_PREEDIT_SEGMENTS || offset >= limit {
+            break;
+        }
+        let byte_len = (seg.value.len() as u32).min(limit - offset);
+        r.preedit_segments[seg_i] = MzkanaPreeditSegment {
+            start: offset,
+            len: byte_len,
+            attr: seg.annotation as u8,
+        };
+        offset += byte_len;
+        seg_i += 1;
+    }
+    r.preedit_segment_count = seg_i as u32;
+
     if let Some(ref c) = out.commit {
         r.commit_len = fill_buf(&mut r.commit, c);
     }
@@ -492,4 +544,70 @@ pub unsafe extern "C" fn mzkana_engine_focused_index(engine: *const MzkanaEngine
         .as_ref()
         .and_then(|e| e.0.focused_index())
         .map_or(-1, |i| i as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::ProcessResult;
+    use mzkana_core::PreeditSegment;
+
+    /// Regression: a preedit longer than the fixed 512-byte buffer (long
+    /// multi-bunsetsu conversion) must never yield segment offsets that point
+    /// past `preedit_len`, or the C++ side reads out of bounds.
+    #[test]
+    fn long_preedit_segments_stay_within_buffer() {
+        // 40 segments of 5 kana each = 200 kana = 600 bytes (> 512).
+        let mut segments = Vec::new();
+        let mut preedit = String::new();
+        for i in 0..40 {
+            let value = "あいうえお".to_string();
+            preedit.push_str(&value);
+            segments.push(PreeditSegment {
+                value,
+                annotation: if i == 0 { 2 } else { 1 },
+            });
+        }
+        assert!(preedit.len() > 512, "test setup should exceed the buffer");
+
+        let out = ProcessResult {
+            consumed: true,
+            preedit,
+            preedit_segments: segments,
+            commit: None,
+            passthrough_key: None,
+            forward_key: None,
+            forward_mods: 0,
+        };
+        let r = result_from(out);
+
+        assert!(r.preedit_len <= 512);
+        assert!(r.preedit_segment_count as usize <= MAX_PREEDIT_SEGMENTS);
+        for i in 0..r.preedit_segment_count as usize {
+            let seg = &r.preedit_segments[i];
+            // start + len must stay within the copied region (no OOB).
+            assert!(
+                seg.start <= r.preedit_len && seg.len <= r.preedit_len - seg.start,
+                "segment {} start={} len={} exceeds preedit_len={}",
+                i, seg.start, seg.len, r.preedit_len
+            );
+        }
+    }
+
+    /// An empty preedit produces no segments (and no panic).
+    #[test]
+    fn empty_preedit_has_no_segments() {
+        let out = ProcessResult {
+            consumed: false,
+            preedit: String::new(),
+            preedit_segments: Vec::new(),
+            commit: None,
+            passthrough_key: None,
+            forward_key: None,
+            forward_mods: 0,
+        };
+        let r = result_from(out);
+        assert_eq!(r.preedit_len, 0);
+        assert_eq!(r.preedit_segment_count, 0);
+    }
 }

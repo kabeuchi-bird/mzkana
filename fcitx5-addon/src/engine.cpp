@@ -251,10 +251,21 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
     std::string preedit(
         reinterpret_cast<const char *>(result.preedit), result.preedit_len);
 
-    // Only re-render the preedit when it actually changed. This keeps the ~100 Hz
-    // tick timer (C2) cheap: a pure pruning/deadline tick that leaves the preedit
-    // unchanged costs no UI update.
-    if (preedit != lastPreedit_) {
+    // Build a compact signature of preedit content + segment annotations so
+    // re-rendering is skipped when nothing visually changed (e.g. tick timer).
+    // Defense in depth: the FFI contract caps segment_count at
+    // MAX_PREEDIT_SEGMENTS, but clamp here so a bad count can never index past
+    // the fixed-size preedit_segments array.
+    const uint32_t segCount =
+        std::min<uint32_t>(result.preedit_segment_count, MAX_PREEDIT_SEGMENTS);
+    std::string preeditSig = preedit;
+    preeditSig += '\x1e';
+    for (uint32_t i = 0; i < segCount; ++i) {
+        preeditSig += static_cast<char>(result.preedit_segments[i].attr);
+        preeditSig += static_cast<char>(result.preedit_segments[i].len & 0xff);
+    }
+
+    if (preeditSig != lastPreedit_) {
         // H2: never show a preedit in a password/sensitive field — it would leak
         // what is being typed to the floating panel.
         const bool sensitive =
@@ -262,7 +273,29 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
 
         fcitx::Text preeditText;
         if (!preedit.empty() && !sensitive) {
-            preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
+            if (segCount > 0) {
+                for (uint32_t i = 0; i < segCount; ++i) {
+                    const auto &seg = result.preedit_segments[i];
+                    // Defense in depth: never read past the copied preedit bytes,
+                    // even if the engine ever hands back an inconsistent offset.
+                    if (seg.start > result.preedit_len ||
+                        seg.len > result.preedit_len - seg.start) {
+                        continue;
+                    }
+                    std::string segStr(
+                        reinterpret_cast<const char *>(result.preedit) + seg.start,
+                        seg.len);
+                    fcitx::TextFormatFlags flags;
+                    if (seg.attr == 2) {
+                        flags = fcitx::TextFormatFlag::HighLight;
+                    } else {
+                        flags = fcitx::TextFormatFlag::Underline;
+                    }
+                    preeditText.append(segStr, flags);
+                }
+            } else {
+                preeditText.append(preedit, fcitx::TextFormatFlag::Underline);
+            }
             preeditText.setCursor(static_cast<int>(preedit.size()));
         }
 
@@ -290,7 +323,7 @@ void MzkanaFcitxEngine::applyResult(fcitx::InputContext *ic,
         }
         ic->updatePreedit();
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
-        lastPreedit_ = preedit;
+        lastPreedit_ = std::move(preeditSig);
     }
 
     // Reflect the latest Mozc candidate window (prediction or conversion).

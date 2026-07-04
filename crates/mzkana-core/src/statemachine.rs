@@ -578,6 +578,14 @@ impl StateMachine {
             return self.emit_sequence(&refs, vec![key.to_string()], None);
         }
 
+        // An empty token list (e.g. an all-whitespace quoted grid cell that
+        // resolves to nothing) has no kana to emit — passthrough rather than
+        // indexing an empty vec, which would panic.
+        if tokens.is_empty() {
+            self.pending_keys.clear();
+            return vec![OutputAction::Passthrough(key.to_string())];
+        }
+
         // Speculative emit of first kana; tail (if any) deferred until confirmed
         let kana = tokens[0].clone();
         let pending_tail: Vec<String> = tokens[1..].to_vec();
